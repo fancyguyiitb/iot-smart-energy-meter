@@ -1,4 +1,4 @@
-![Submission Check](https://github.com/edl-iitb-admin/base-repo/actions/workflows/classroom.yml/badge.svg)
+![Docs Added](https://github.com/edl-iitb/edl-25-iitb-edl-25-project-submission-base-repo/actions/workflows/classroom.yml/badge.svg)
 
 ### EDL 2025 Project Submission Repository.
 
