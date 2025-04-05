@@ -36,6 +36,13 @@ jobs:
             echo "✅ Found file: bom.xls"
           fi
 
+          if [ ! -f "README.md" ]; then
+            echo "❌ Missing top-level README.md"
+            MISSING=1
+          else
+            echo "✅ Found top-level README.md"
+          fi
+
           if [ $MISSING -eq 1 ]; then
             echo "❌ One or more required folders/files are missing."
             exit 1
