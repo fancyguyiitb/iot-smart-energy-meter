@@ -1,0 +1,9 @@
+[tool.pyright]
+venvPath = "."
+venv = ".venv"  # Change this if your venv has a different name
+typeCheckingMode = "off"  # Disables strict type checking
+reportOptionalMemberAccess = "none"
+reportOptionalSubscript = "none"
+reportOptionalCall = "none"
+reportGeneralTypeIssues = "none"
+reportUnnecessaryTypeIgnoreComment = "none"
