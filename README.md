@@ -94,4 +94,28 @@ Since this mechanical modification, the backup system has consistently charged w
 
 ---
 
+## Future Scope
+
+To further enhance the system’s functionality, usability, and sustainability, future contributors can explore the following improvements:
+
+### 1. Sound Alerts for Power Failure
+
+Implementing audio alerts during power failures can significantly improve user responsiveness and system awareness. Key aspects of this feature include:
+
+- **Immediate Notifications:** Sound alerts ensure that users are informed of outages even when they are not actively monitoring the screen.
+- **Severity-based Tones:** Different tones can indicate varying levels of urgency, such as battery low, power cut, or system reboot.
+- **Remote Deployment Advantage:** Especially beneficial for systems installed in remote or unattended locations.
+
+### 2. Integration with Solar Energy
+
+Adding solar energy support can make the system more eco-friendly and independent of the grid. Potential features include:
+
+- **Real-Time Monitoring:** Track solar power input and battery charge levels live.
+- **Smart Source Switching:** Automatically switch between grid and solar based on availability and efficiency.
+- **Analytics and Optimization:** Log and compare energy generation versus consumption to inform sustainable usage patterns.
+
+**Impact:**  
+These enhancements will improve system reliability, promote green energy adoption, and make the solution more adaptable to diverse deployment scenarios including smart homes, rural areas, and energy-conscious environments.
+
+---
 
