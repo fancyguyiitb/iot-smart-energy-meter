@@ -79,10 +79,19 @@ The optimizations resulted in a significantly more responsive and user-friendly 
 ### 2. Power Backup System Failure
 
 **Problem:**  
-The power backup system failed to operate as intended. Upon inspection, we identified that the battery wasn’t charging properly, which led to a complete loss of backup power during outages.
+The power backup system failed to operate as intended during initial testing. Despite proper wiring and configuration, the battery did not charge, leading to a complete failure of backup functionality during power outages.
 
-**Solution:**  
-*To be documented post root-cause mitigation and implementation of a new charging and power management system.*
+**Diagnosis and Root Cause:**  
+After thorough inspection, we discovered that enclosing the circuitry between two tightly fitted acrylic sheets had introduced mechanical stress. This stress likely caused certain solder joints or connectors to either loosen or become overly compressed, ultimately disrupting the battery charging pathway.
+
+**Solution Implemented:**
+
+- **Mechanical Redesign:** We removed one of the acrylic sheets from the enclosure to relieve the internal stress and allow for natural ventilation and movement.
+- **Post-Modification Testing:** After this adjustment, the charging system began functioning correctly, indicating that the issue was indeed related to physical strain affecting circuit integrity.
+
+**Outcome:**  
+Since this mechanical modification, the backup system has consistently charged without failure. This incident highlighted the critical importance of allowing tolerance for mechanical flexibility in compact hardware designs, especially when working with sensitive analog and power electronics.
 
 ---
+
 
