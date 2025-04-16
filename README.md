@@ -21,7 +21,8 @@
 
 ### Problem Statement and Solution
 
-We developed an IoT-based 3-phase smart energy meter that allows users to monitor power parameters, analyze power quality, and remotely control the power supply. The system supports real-time data logging, mobile access, and predictive maintenance insights through harmonics analysis.
+We developed an IoT-based 3-phase smart energy meter that enables users to monitor power parameters, analyze power quality, and remotely control the power supply. The system supports real-time data logging, mobile access, and predictive maintenance via harmonics analysis.  
+For setup and usage instructions, refer to [Manual.md](Manual.md)..
 
 #### Team & Contributions
 
@@ -118,4 +119,3 @@ Adding solar energy support can make the system more eco-friendly and independen
 These enhancements will improve system reliability, promote green energy adoption, and make the solution more adaptable to diverse deployment scenarios including smart homes, rural areas, and energy-conscious environments.
 
 ---
-

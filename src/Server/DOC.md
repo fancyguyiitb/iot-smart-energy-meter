@@ -87,18 +87,6 @@ This document describes the overall architecture of our server application, the 
    - **Write Operations**: The server uses InfluxDB’s client libraries (`write_api`) to store time-series data from the RPi.
    - **Query Operations**: The server retrieves data and analytics from InfluxDB to respond to client queries.
 
-## TODOs
-
-1. **Bluetooth Integration**
-
-   - [ ] Implement the actual Bluetooth handshake on the RPi side to securely transfer the `device_code` to the mobile app.
-   - [ ] Ensure that once the user receives the `device_code` over Bluetooth, they can pass it to the server’s `/sign-up` endpoint.
-
-2. **User & Device Linking**
-   - Confirm that each `device_id` can only be linked to one user (or decide if multiple users per device is allowed).
-   - Currently, the code deletes existing user auth data for a device before inserting a new record—review InfluxDB
-     this is desired behavior or if we should reject sign-up if a device is already registered.
-
 ## Conclusion
 
 Our architecture is designed for:
