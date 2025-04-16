@@ -54,3 +54,35 @@ Python scripts for data collection from ADE9000, local caching via SQLite, devic
 FastAPI backend for authentication, data ingestion (InfluxDB), analytics, and WebSocket command handling. Includes API routes, config, and docs.
 
 ---
+
+## Learning from Mistakes
+
+### 1. UI Lag Due to Excessive Local Storage Data on Raspberry Pi
+
+**Problem:**  
+We encountered significant UI lag on the Raspberry Pi when the local storage accumulated large volumes of data. This led to delayed response times, particularly while switching between tabs, resulting in a poor user experience.
+
+**Solution Implemented:**
+
+- **Data Limitation:** We limited local data storage to only one day's worth of energy data to prevent database bloat and ensure smoother real-time operations.
+- **Historical Data Handling:** For the "History" tab, we retained only a single representative energy data point from the previous day. This allowed for historical trend analysis with minimal storage overhead.
+- **Improved UI Feedback:** A loading screen was introduced when switching tabs to:
+  - Indicate the system is processing,
+  - Discourage excessive button tapping,
+  - Improve overall user satisfaction and interface intuitiveness.
+
+**Outcome:**  
+The optimizations resulted in a significantly more responsive and user-friendly interface with better resource management on the Raspberry Pi.
+
+---
+
+### 2. Power Backup System Failure
+
+**Problem:**  
+The power backup system failed to operate as intended. Upon inspection, we identified that the battery wasn’t charging properly, which led to a complete loss of backup power during outages.
+
+**Solution:**  
+*To be documented post root-cause mitigation and implementation of a new charging and power management system.*
+
+---
+
