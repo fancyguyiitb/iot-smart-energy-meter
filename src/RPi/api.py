@@ -97,9 +97,13 @@ def monitor_data(interval: float = SAMPLE_INTERVAL_S) -> None:
     while True:
         loop_start = time.monotonic()
         try:
-            if n % 10 == 0 and not (ade9000.spi_read_16(ADDR_RUN) & 0x1):
+            # Checked every sample: an unconfigured chip reads 0 V, which must never be
+            # stored (the failure logger would record a blackout on all phases).
+            if not (ade9000.spi_read_16(ADDR_RUN) & 0x1):
                 l.eprint("[WARN] ADE9000 lost its configuration (RUN=0); re-initialising")
                 initialize_ade9000()
+                last_sample_t = time.monotonic()  # don't integrate energy across the outage
+                continue
 
             voltage = ade9000.read_voltage_rms_regs()
             current = ade9000.read_current_rms_regs()

@@ -50,10 +50,10 @@ On the real Pi, set `VOLTIX_HAL=hardware` in `src/RPi/device.env` and the same f
 | `src/VirtualDevice/` | Virtual meter board: physical model, register-level ADE9000 emulation, control panel |
 | `src/Server/` | FastAPI backend: auth, ingest, analytics, device WebSocket, `storage/` (SQLite or InfluxDB), `manage.py` |
 | `src/WebApp/` | Browser client (reference client while the Flutter source is missing) |
-| `src/Application/` | Flutter project scaffold (the Dart `lib/` was lost to a `.gitignore` rule, see `docs/BUGFIXES.md`) |
+| `src/Application/` | Flutter project scaffold (the Dart `lib/` was lost to a `.gitignore` rule, now fixed) |
 | `scripts/` | `run_local.py`, `run_tests.py`, `e2e_check.py` |
 | `tests/` | Firmware and server regression tests |
-| `docs/BUGFIXES.md` | Every bug fixed, where, and the test that covers it |
+| `docs/BUGFIXES.md` | Open bugs, known limitations, and the feature backlog |
 | `deploy/` | InfluxDB compose file for trying the cloud storage backend |
 | `pcb/`, `3d_models/`, `reports/`, `others/`, `bom.xls` | Hardware design files and project reports |
 

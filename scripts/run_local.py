@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -48,6 +49,11 @@ def run_once(args: list[str], cwd: Path) -> str:
     if out.returncode != 0:
         sys.exit(f"{' '.join(args)} failed:\n{out.stdout}\n{out.stderr}")
     return out.stdout.strip()
+
+
+def port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
 
 
 def wait_http(url: str, timeout: float = 30) -> bool:
@@ -82,6 +88,11 @@ def main() -> None:
     parser.add_argument("--board-port", type=int, default=9000)
     parser.add_argument("--device-id", default="meter-001")
     args = parser.parse_args()
+
+    busy = [p for p in (args.server_port, args.board_port) if port_in_use(p)]
+    if busy:
+        sys.exit(f"Port(s) {', '.join(map(str, busy))} already in use - is another run_local.py still running? "
+                 "Stop it (Ctrl+C in its terminal) or pass --server-port / --board-port.")
 
     server_url = f"http://127.0.0.1:{args.server_port}"
     board_url = f"http://127.0.0.1:{args.board_port}"

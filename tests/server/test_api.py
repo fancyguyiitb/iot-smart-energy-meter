@@ -1,4 +1,4 @@
-"""Regression tests for the server-side bug fixes (IDs refer to docs/BUGFIXES.md)."""
+"""Regression tests for the server-side bug fixes (IDs refer to the original code review)."""
 
 import sqlite3
 import threading

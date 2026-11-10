@@ -4,7 +4,7 @@ FastAPI backend. It authenticates users and meters, ingests readings, serves ana
 
 ![System Architecture](EDL.png)
 
-The architecture rationale is in [DOC.md](./DOC.md). What changed and why is in [docs/BUGFIXES.md](../../docs/BUGFIXES.md).
+The architecture rationale is in [DOC.md](./DOC.md). Open bugs and planned features are in [docs/BUGFIXES.md](../../docs/BUGFIXES.md).
 
 ---
 

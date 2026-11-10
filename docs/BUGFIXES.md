@@ -1,74 +1,145 @@
-# Bug fixes
+# Open bugs and feature backlog
 
-Status of every bug from the code review, plus the ones found while fixing them (N1–N8).
-IDs match the review document. "e2e" = `scripts/e2e_check.py` against the running stack;
-test files are under `tests/`.
+Everything from the code review that has been fixed is removed from this list. Each changed module's docstring describes what it fixed, and `tests/` guards the fixes. What remains: open bugs, known limitations, and a menu of features to choose from.
 
-## Critical: data loss, security, safety
+Effort: **S** ≈ 1 day, **M** ≈ 2–4 days, **L** ≈ 1–2 weeks.
 
-| ID | Bug | Fix | Where | Verified by |
+---
+
+## Open bugs
+
+| ID | Bug | Impact | Suggested fix | Effort |
 |---|---|---|---|---|
-| C1 | Device sent IST time with a bogus `Z` (`…+05:30Z`); server's `strptime` always failed and used `now()`, so each sync batch collapsed onto one timestamp (~90% of readings overwritten) | Device sends UTC ISO-8601; server validates with a timezone-aware model and rejects bad rows individually | `RPi/db.py` `to_utc_iso`, `Server/utils/models.py` `Reading` | `test_unsynced_rows_leave_as_utc`, `test_batch_keeps_every_timestamp`, `test_bad_rows_are_rejected_individually`, e2e |
-| C2 | InfluxDB `write_api()` defaults to batching: 201 returned before (and even if not) written | `SYNCHRONOUS` writes; storage errors return 503 so the device retries | `Server/storage/influx_store.py`, `api/routes.py` | code review (Influx backend not run locally) |
-| C3 | `/api/fetch-all` dumped the whole bucket incl. plaintext passwords, unauthenticated | Endpoint removed; users moved out of the metrics store | `Server/api/routes.py` | `test_fetch_all_is_gone`, e2e |
-| C4 | No route checked auth: anyone could switch off a supply or write fake data | User JWT on every user route, device key on device routes, ownership check per device | `Server/api/dependencies.py` | `test_user_endpoints_require_login`, `test_ingest_requires_valid_device_key`, e2e |
-| C5 | Anyone could open the device WebSocket as "random12" | Per-device key checked on the handshake (rejected before accept) | `Server/api/websockets.py`, `RPi/relay.py` | `test_forged_device_websocket_is_rejected`, e2e |
-| C6 | Sign-up QR key hard-coded in the public repo; token never expired; re-registering took over a device | Per-device claim key from provisioning, 10-min TTL, one-time nonce, owned meters can't be re-claimed | `RPi/claim.py`, `Server/api/auth.py`, `utils/database.py` | `test_claim_codes_expire_and_are_single_use`, `test_claim_code_is_signed_with_device_key`, e2e |
-| C7 | Plaintext passwords, sent as URL query params | PBKDF2-SHA256 (600k iterations), JSON body, timing-equalised login | `Server/utils/security.py`, `api/auth.py` | `test_passwords_are_hashed`, `test_login` |
-| C8 | Row cap deleted unsynced rows; sync sent *all* unsynced rows in one request (poison pill after an outage) | Batches of 500, timeout, exponential backoff, backlog drains back-to-back; only synced rows are pruned | `RPi/sync.py`, `RPi/db.py` | `test_prune_never_deletes_unsynced_rows`, `test_batches_are_bounded_and_oldest_first`; restart picked up 12 pending rows |
+| B1 | `ADE9000.spi_burst_read_resampled_wfb` calls `spi_transfer16`, which doesn't exist | Waveform capture crashes if called (unused today) | One `xfer2` per burst with chip-select held throughout; emulate the waveform buffer in the virtual chip | S |
+| B2 | A new owner of a resold meter sees the previous owner's readings and relay history, including usernames | Privacy leak between households | Scope user queries to data after the owner's `claimed_at` | S |
+| B3 | If the Pi boots with an empty local DB and the server is unreachable, the energy counter restarts at 0 | Displayed cumulative kWh drops (consumption analytics are unaffected: they sum positive steps) | Retry the remote restore before accepting a 0 baseline; persist the counter in a small separate file | S |
+| B4 | The Pi has no real-time clock. Before NTP syncs at boot, readings get a wrong but plausible timestamp, and the server accepts anything up to 400 days old | Data filed under the wrong day | Wait for NTP sync (`timedatectl`) before sampling | S |
+| B5 | Rows the server rejects are marked synced and dropped; only the server logs them | Rare, silent loss of malformed rows | Keep rejected rows in a local dead-letter table; show the count on the device | S |
+| B6 | Power-failure events stay on the Pi | The app can't show outages | Sync `power_events` like readings; add an events endpoint and app view | S |
+| B7 | The touchscreen GUI places widgets at fixed pixel positions for a 2000×1010 screen | Layout breaks on other screen sizes | Grid/pack layout with relative sizing | M |
+| B8 | The web app loads Chart.js from a CDN | No charts on an offline LAN | Vendor `chart.js` into `src/WebApp` | S |
 
-> **Action needed outside the code:** the old Fernet key in `QRCodePage.py` and the Railway URLs are in git history. Treat them as burnt: rotate the server `SIGNUP_SEC_KEY` / InfluxDB token if that deployment still exists.
+## Known limitations and tech debt
 
-## High: wrong numbers or broken features
+| Area | Limitation | Plan |
+|---|---|---|
+| Storage | The InfluxDB backend is written but has never been run (Docker wasn't available) | Run `scripts/e2e_check.py` against `deploy/docker-compose.yml` before the cloud move |
+| Latency | The cloud sees readings one sync batch (10 s) later | Feature 2 (live lane) or feature 14 (MQTT) |
+| Scale | Device WebSocket connections live in one server process | Shared broker (Redis pub/sub or MQTT) before running more than one worker |
+| Retention | The server keeps 1 Hz data forever; month queries scan raw rows | Hourly and daily rollups plus a retention policy |
+| Auth | No rate limiting on login or sign-up; the web app keeps its token in `localStorage`; no refresh tokens or password reset | Rate limiter; short-lived token plus refresh token; reset flow |
+| Transport | Device keys travel in request headers, which is safe only over HTTPS | Enforce HTTPS/WSS in the cloud; mTLS device certificates (feature 13) |
+| Operations | No systemd units on the Pi, so a crashed process stays down; logs only go to stdout | Unit files with `Restart=always` and a watchdog; rotated log files |
+| Client | The Flutter source was lost; the web app is the reference client | Rewrite against the current API (`src/Application/README.md`) |
+| Tests | No automated tests for sync backoff, relay reconnects or the InfluxDB backend | Cover them in hardware-in-the-loop CI (feature 11) |
 
-| ID | Bug | Fix | Where | Verified by |
+**Outside the code:** the old QR encryption key (`QRCodePage.py`) and the Railway deployment URLs are in git history. Rotate any secrets of that deployment if it still exists.
+
+---
+
+## Features to choose from
+
+| # | Feature | Area | Effort | Do first |
 |---|---|---|---|---|
-| H1 | Root `.gitignore` `lib/` hid `src/Application/lib` (Flutter source never committed) | `/lib/` (root only) | `.gitignore` | `git check-ignore` |
-| H2 | Home screen queried phases A/B/C; data is stored as R/Y/B | Query R/Y/B | `RPi/pages/HomePage.py` | GUI smoke test |
-| H3 | Energy restore crashed on a healthy server (two return shapes), used a different host, no timeout | One shape, one configured `SERVER_URL`, timeout, device auth | `RPi/helpers.py`, `RPi/config.py` | restart resumed energy (log) |
-| H4 | `sign_extend_32` returned the magnitude: export / reversed CT counted as consumption | Two's complement | `RPi/ADE9000API.py` | `test_sign_extension_is_twos_complement`, `test_driver_decodes_what_the_wires_carry`, `test_reversed_ct_shows_negative_power` |
-| H5 | Energy integrated with a nominal 1 s dt | Measured `time.monotonic()` dt, capped after stalls | `RPi/api.py` | code review (hardware accumulators are USP 1) |
-| H6 | Energy reset could not work (page skipped, flag in wrong process, restore undid it, DB deleted) | `ResetPage.py`; request/ack through the shared DB; restore uses latest not max; raw data kept | `RPi/pages/ResetPage.py`, `RPi/db.py`, `RPi/api.py` | `test_energy_reset_request_is_seen_once`, `test_last_energy_is_latest_not_max`, live check (applied in 0.6 s) |
-| H7 | Failure logger imported a missing module; phase keys mismatched; no staleness check; kept 1 not 5 | Fixed import, R/Y/B end to end, 5 s staleness, 5 per phase | `RPi/failure_log.py`, `RPi/api.py` | `test_failure_log_keeps_last_five_per_phase`, live outage scenario |
-| H8 | All relays on GPIO 17; heartbeat read wrong phases; no reconnect; restart toggled supply | Pin per phase, persisted state restored with `initial=`, reconnect with backoff, acked commands | `RPi/relay.py` | e2e relay round trip (board relay opens, measured current → 0 A) |
-| H9 | Old socket's disconnect removed the new socket; dead sockets left on errors | Identity check on unregister, catch-all cleanup | `Server/api/services.py` | `test_old_socket_disconnect_does_not_drop_new_one` |
-| H10 | Blocking DB calls inside `async def` froze the event loop | Sync routes run in the threadpool; async routes offload DB calls | `Server/api/*.py` | code review |
-| H11 | Tk widgets touched from background threads | All page switching and overlays on the Tk main thread | `RPi/app.py`, `CurrentPage.py`, `PowerPage.py` | GUI smoke test |
-| H12 | GUI lag: `COUNT(*)` per insert, no indexes, full-day re-reads every second | WAL, indexes, periodic pruning, incremental reads | `RPi/db.py`, `RPi/pages/EnergyPage.py`, `HistoryPage.py` | GUI smoke test |
+| 1 | Billing-grade energy from the chip's own accumulators | Metering | M | – |
+| 2 | Sync that loses nothing, plus a live lane | Reliability | M | – |
+| 3 | Power-quality event engine | Metering | M | – |
+| 4 | Fail-safe switching with closed-loop verification | Control | M | – |
+| 5 | 3-phase load-balancing advisor and bill forecast | Product | L | 1, 6 |
+| 6 | Appliance detection from power signatures | Product / ML | L | – |
+| 7 | Waveform capture and harmonic spectrum | Metering / DSP | L | B1 |
+| 8 | Max-demand monitoring and automatic load shedding | Control | M | 4 |
+| 9 | Schedules and automation rules | Control | M | 4 |
+| 10 | Consumption anomaly detection | ML | M | – |
+| 11 | Hardware-in-the-loop CI | Engineering | S | – |
+| 12 | Local-first control over the LAN | Reliability | M | 4 |
+| 13 | Device certificates and signed OTA updates | Security / Ops | L | – |
+| 14 | MQTT transport with device shadow | Platform | L | 2, 4 |
+| 15 | Fleet dashboard and device health | Platform | M | – |
+| 16 | Alerts: push, Telegram, email | Product | S | 3 or 8 |
+| 17 | Tamper detection | Metering / Security | M | 3 |
+| 18 | Monthly report and data export | Product | S | – |
+| 19 | Observability: metrics and dashboards | Operations | S | – |
+| 20 | Household roles and sharing | Product / Security | M | – |
 
-## Medium
+**A strong interview set:** 1 + 3 + 4 + 11. That covers hardware depth, safety under an unreliable network, and engineering rigour, and each is demoable on the virtual board. Add 5 if you want a product story.
 
-| ID | Bug | Fix | Where |
-|---|---|---|---|
-| M1 | Energy analytics = avg/min/max of a running counter | Consumption = sum of positive steps (survives resets) | `Server/analytics/helpers.py`, `storage/*` (test: `test_energy_consumption_survives_counter_reset`) |
-| M2 | Cached analytics stamped with the wrong time, 404 after writing, a write per request | Computed on read, no cache | `Server/analytics/helpers.py` |
-| M3 | Accounts and device keys vanished after 30 days; "delete" was a read | Relational users/devices tables | `Server/utils/database.py` |
-| M4 | Flux injection through `device_id` / `phase` | Flux `params`, allow-listed fields; device comes from the token | `Server/storage/influx_store.py` |
-| M5 | Token lifetime 3600 *minutes* | 60 minutes, configurable | `Server/config.py` |
-| M6 | `/latest-values` never returned frequency (typo `viltage_freq`) | All fields returned | `Server/api/routes.py` |
-| M7 | Relay status one step stale | Commands wait for the device's ack; status refreshes first | `Server/api/services.py`, `websockets.py` (test: `test_command_waits_for_device_ack`) |
-| M8 | Live plots: local-time "today", unbounded lists, `id % 3` decimation tied to 4 rows/sample | IST day, midnight reset, time-based decimation | `RPi/pages/CurrentPage.py`, `PowerPage.py` |
-| M9 | Two different DB paths | One `config.py` | `RPi/config.py` |
-| M10 | Hard-coded `random12` | Provisioned per device (`manage.py provision-device`) | `Server/manage.py`, `RPi/config.py` |
-| M11 | Docs vs code drift; failure page never refreshed; CORS `*` + credentials; `None` settings | History kept per day in `daily_energy`; refresh loop on show; explicit CORS origins; validated settings | `RPi/db.py`, `PowerFailurePage.py`, `Server/main.py`, `Server/config.py` |
+### Metering and power quality
 
-## Found while fixing
+**1. Billing-grade energy from the chip's own accumulators**
+- Read the ADE9000's `xWATTHR` registers each second with reset-on-read, instead of integrating power in Python. The chip integrates at its internal sample rate, so a stalled Pi loses no energy.
+- Store per-second deltas with a sequence number and split import from export. Totals are a server-side sum, so restores and resets become trivial.
+- Prove accuracy against the virtual board's ground-truth counters (class 1 = ±1%). The virtual chip already emulates reset-on-read and 32-bit wrap.
 
-| ID | Bug | Fix | Where |
-|---|---|---|---|
-| N1 | PF register not sign-extended: PF −0.99 decoded as ~31 | Sign extension | `RPi/ADE9000API.py` (test: `test_driver_decodes_what_the_wires_carry`) |
-| N2 | Angle scale test `(accmode & 0x0100) >= 0` always true → 60 Hz scale on a 50 Hz grid (20% error) | `if accmode & 0x0100` | `RPi/ADE9000API.py` (test: `test_angles_use_50hz_scale`) |
-| N3 | `WATTHR_B/C` shifted HI left by 32 bits (2³² too large); `WATTHR_A` not sign-extended | `signed(HI) × CAL_ENERGY_CC` | `RPi/ADE9000API.py` (test: `test_energy_register_decoding_matches_chip_accumulator`) |
-| N4 | Hiding and re-showing a page started a second refresh loop (each tab switch could double DB polling) | Pending `after()` job cancelled on hide | all live pages |
-| N5 | EnergyPage gap detection never fired (`prev_ts` never updated) | Updated per row | `RPi/pages/EnergyPage.py` |
-| N6 | Reading right after `RUN=1` returned zeros → false power failure logged on every boot | 1 s DSP settle + 2-sample debounce in the failure logger | `RPi/api.py`, `RPi/failure_log.py` |
-| N7 | `os.replace` fails on Windows while another process has the file open | Retrying atomic write | `RPi/fileutil.py` |
-| N8 | Bad rows in a batch failed the whole request → sync blocked forever | Per-row validation, rejected rows reported | `Server/api/routes.py` |
+**3. Power-quality event engine**
+- Rules with hysteresis and minimum duration classify sags (0.1–0.9 pu), swells (1.1–1.8 pu) and interruptions, plus voltage and current unbalance.
+- Detect a loose neutral (phase voltages diverge while neutral current changes) and a reversed CT (sustained negative power on one phase).
+- Events sync to the server and show in the app. Every case already has a scenario button on the virtual board.
 
-## Not fixed yet
+**7. Waveform capture and harmonic spectrum**
+- Capture the ADE9000 waveform buffer around an event or on demand, run an FFT on the Pi, and show harmonics 1–25 per phase next to the raw waveform.
+- Needs B1 fixed and waveform-buffer emulation in the virtual chip, built from each appliance's harmonic profile.
 
-* `ADE9000.spi_burst_read_resampled_wfb` calls a method that doesn't exist (`spi_transfer16`). Unused today; the waveform buffer needs chip-select held across transfers, which the virtual SPI does not model yet.
-* The Flutter app source is not in the repo (H1 lost it). `src/WebApp` is the reference client until it's rewritten.
-* Time-series and relay history stay with the *device*, so a new owner after a resale can see the previous owner's history. Needs a data-ownership decision (scope queries to `claimed_at`).
-* The InfluxDB backend implements the same interface but is untested locally (Docker wasn't running). Before the cloud move, start `deploy/docker-compose.yml`, set `STORAGE_BACKEND=influx` and run `scripts/e2e_check.py` against it.
-* Live data reaches the cloud one sync batch later (10 s). USP 2's "live lane" addresses this.
+**17. Tamper detection**
+- Log the events a utility meter logs: reversed CT, missing neutral (measured neutral current ≠ phasor sum), bypass (phase currents and neutral disagree), chip power cycles, and an enclosure-open switch on a GPIO.
+- Tamper log is synced, timestamped and can't be cleared from the device.
+
+### Control
+
+**4. Fail-safe switching with closed-loop verification**
+- A device shadow keeps desired and reported state apart; the app shows pending, then confirmed or failed.
+- After switching a phase off, the meter checks with its own sensor that the current fell below about 0.05 A within 500 ms. Otherwise it reports a welded relay. (Add a welded-relay fault to the virtual board to test this.)
+- Local interlocks work without the cloud: a 3-minute minimum off-time protects compressors, ON is refused during a sag or swell, and an overcurrent trip runs on the device.
+
+**8. Max-demand monitoring and automatic load shedding**
+- Compute the 15- or 30-minute rolling average demand, the way demand charges are billed, and warn at 90% of the sanctioned load.
+- Optionally shed the lowest-priority phase automatically, with hysteresis and an automatic restore.
+
+**9. Schedules and automation rules**
+- Relay schedules and rules such as "if phase B is above 3 kW for 10 minutes, turn it off". Rules run on the device, so they keep working offline.
+- Rules are versioned and checked for conflicts, with time-of-day tariff hints such as "running the geyser at 6 am saves ₹X a month".
+
+### Product and insight
+
+**5. 3-phase load-balancing advisor and bill forecast**
+- Measure unbalance % and neutral current, find movable loads (using feature 6), and simulate moving each one: "move the 1.5 kW evening load from Y to B: unbalance 38% → 9%".
+- Forecast the month's units and cost from the daily profile and the user's slab tariff, and warn before a slab is crossed.
+
+**6. Appliance detection from power signatures**
+- Detect step changes in each phase's active and reactive power and THD, cluster the steps into appliance signatures, and draw an "AC on 19:02–21:40" timeline.
+- The virtual board knows which appliance is really on, so you can report precision and recall instead of screenshots.
+
+**10. Consumption anomaly detection**
+- Build an hour-of-week baseline (median and spread) from history and flag unusual use: "3× normal at 3 am", or a fridge running much longer than usual (an early sign of a fault).
+
+**16. Alerts**
+- Notify on outages, power-quality events, relay changes and high usage by Telegram bot, email or web push, with de-duplication, rate limits and quiet hours.
+
+**18. Monthly report and data export**
+- Monthly PDF or CSV: consumption by day and phase, peak demand, a power-quality summary and the estimated bill. Optionally emailed on the 1st.
+
+**20. Household roles and sharing**
+- Owner, member and viewer roles with invite links. Only owners and members can switch relays, and the audit log shows who did it.
+
+### Platform and engineering
+
+**11. Hardware-in-the-loop CI**
+- A GitHub Actions workflow that runs the unit tests, boots the server, the virtual board and the firmware headless, then runs `e2e_check.py` plus scenario tests (outage → failure logged, solar → negative power).
+- Every pull request proves the whole system still works end to end. Cheap to build and impressive to show.
+
+**12. Local-first control over the LAN**
+- The Pi serves a small authenticated API on the local network. The app falls back to it when the cloud is unreachable, so relays and live readings keep working during an internet outage.
+
+**13. Device certificates and signed OTA updates**
+- Per-device X.509 certificates (mTLS) replace shared API keys.
+- Signed release bundles install with an A/B scheme, a post-update health check and automatic rollback.
+
+**14. MQTT transport with device shadow**
+- Replace HTTP sync and the WebSocket with MQTT: QoS 1 telemetry, a retained shadow topic for the relays, and a last-will message for online status.
+- This also removes the single-worker limit on the server. A good trade-off discussion versus the current design.
+
+**15. Fleet dashboard and device health**
+- Installer or utility view across many meters: last seen, sync backlog, firmware version, chip temperature, error counts, with drill-down.
+
+**19. Observability**
+- A `/metrics` endpoint (ingest rate, rejected rows, meters online, command latency) and device metrics (sync backlog, sampling-loop overruns), with a Grafana dashboard kept in the repo.

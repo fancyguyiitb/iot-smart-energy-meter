@@ -10,7 +10,7 @@ It has three layers:
 | Chip | `chip.py` | Register-level ADE9000 emulation: SPI framing, RUN gate, RMS/power/PF/THD/period/angle/temperature registers, 32-bit wrapping energy accumulators |
 | Bus | `server.py` | HTTP endpoints for the firmware's virtual SPI (`/spi/0/0`) and GPIO (`/gpio/*`), plus the control panel API |
 
-The firmware's real driver (`src/RPi/ADE9000API.py`) runs unchanged against this chip. Register codes are derived from the board's calibration constants, so every conversion in the driver is exercised, including the sign-extension and scaling bugs this caught (see `docs/BUGFIXES.md`).
+The firmware's real driver (`src/RPi/ADE9000API.py`) runs unchanged against this chip. Register codes are derived from the board's calibration constants, so every conversion in the driver is exercised. That is how the driver's sign-extension and register-scaling bugs were caught.
 
 ## Run
 
