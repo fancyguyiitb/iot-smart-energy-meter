@@ -10,7 +10,7 @@ from matplotlib.ticker import FuncFormatter
 from matplotlib.ticker import ScalarFormatter
 import numpy as np
 
-DB_NAME = "power_meter_data.db"
+from config import DB_PATH as DB_NAME  # one DB path shared by every process
 BTN_BG = "lightgray"
 BTN_SELECTED = "white"
 IST = ZoneInfo("Asia/Kolkata")
@@ -101,122 +101,89 @@ class EnergyPage(tk.Frame):
     def on_show(self):
         print("[EnergyPage] Active")
         self.update_loop_running = True
-        self.after(100, self.update_data)
+        self._job = self.after(100, self.update_data)
 
     def on_hide(self):
         print("[EnergyPage] Hidden")
         self.update_loop_running = False
+        if getattr(self, "_job", None):
+            self.after_cancel(self._job)  # don't leave a refresh loop running while hidden
+            self._job = None
 
     def update_data(self):
+        """Incremental: only rows newer than the last one seen are read each second.
+
+        The old version re-read the entire day (about 350k rows by evening) every second
+        on the Tk thread, which was the main source of the GUI lag. Today's energy is the
+        sum of positive steps of the cumulative counter, so an energy reset mid-day no
+        longer flattens the plot.
+        """
         if not self.update_loop_running:
             return
 
         try:
-            day_start = datetime.combine(date.today(), datetime.min.time()).replace(
+            day_start = datetime.combine(datetime.now(IST).date(), datetime.min.time()).replace(
                 tzinfo=IST
             )
             day_end = day_start + timedelta(days=1)
-            prev_day_start = day_start - timedelta(days=1)
-            prev_day_end = (
-                day_start  # previous day ends exactly when current day starts
-            )
-
-            # Dictionary to store the last value of previous day per phase
-            prev_day_last = {}
-
-            # For each phase, query the last entry of the previous day
             phases = ["R", "Y", "B"]
-            with sqlite3.connect(DB_NAME) as conn:
-                cursor = conn.cursor()
-                for phase in phases:
-                    cursor.execute(
-                        """
-                        SELECT energy_kwh, timestamp
-                        FROM power_data
-                        WHERE phase = ? AND timestamp BETWEEN ? AND ?
-                        ORDER BY timestamp DESC
-                        LIMIT 1
-                    """,
-                        (phase, prev_day_start.isoformat(), prev_day_end.isoformat()),
-                    )
-                    result = cursor.fetchone()
-                    if result:
-                        prev_energy, ts = result
-                        prev_day_last[phase] = prev_energy
-                    else:
-                        prev_day_last[phase] = (
-                            0  # use zero if no previous day entry is found
-                        )
 
-            # Prepare a fresh data storage structure
-            # Here we assume self.data is a dictionary that has a key for each phase,
-            # with a dictionary containing lists for timestamps and energy readings.
-            self.data = {phase: {"timestamps": [], "Energy_E": []} for phase in phases}
+            if getattr(self, "_day", None) != day_start:
+                # New day (or first show): reset the plot and find yesterday's last reading once.
+                self._day = day_start
+                self.last_logged_id = 0
+                self.data = {phase: {"timestamps": [], "Energy_E": []} for phase in phases}
+                self._today_kwh = {phase: 0.0 for phase in phases}
+                self._last_energy = {}
+                self._prev_ts = {phase: None for phase in phases}
+                with sqlite3.connect(DB_NAME) as conn:
+                    for phase in phases:
+                        row = conn.execute(
+                            """
+                            SELECT energy_kwh FROM power_data
+                            WHERE phase = ? AND timestamp >= ? AND timestamp < ?
+                            ORDER BY id DESC LIMIT 1
+                            """,
+                            (phase, (day_start - timedelta(days=1)).isoformat(), day_start.isoformat()),
+                        ).fetchone()
+                        if row:
+                            self._last_energy[phase] = row[0]
 
-            # Now load current day data only
             with sqlite3.connect(DB_NAME) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
+                rows = conn.execute(
                     """
                     SELECT id, phase, energy_kwh, timestamp
                     FROM power_data
-                    WHERE timestamp >= ? AND timestamp < ?
+                    WHERE id > ? AND timestamp >= ? AND timestamp < ?
                     ORDER BY id ASC
-                """,
-                    (day_start.isoformat(), day_end.isoformat()),
-                )
-                rows = cursor.fetchall()
+                    """,
+                    (self.last_logged_id, day_start.isoformat(), day_end.isoformat()),
+                ).fetchall()
 
-            # Process the current day entries
-            prev_timestamp_per_phase = {phase: None for phase in phases}
-
-            for row in rows:
-                row_id, phase, energy, timestamp_str = row
-                # Skip if phase is not one of the expected ones
-                if phase not in self.data:
+            for row_id, phase, energy, timestamp_str in rows:
+                self.last_logged_id = row_id
+                if phase not in self.data or energy is None:
                     continue
-
-                # Convert the timestamp from ISO format; assumes stored timestamps include timezone info
                 dt = datetime.fromisoformat(timestamp_str)
-                # Only use records for the current day (they should already be filtered, but we double-check)
-                if day_start <= dt < day_end:
-                    # Get the previous day last entry for this phase
-                    prev_value = prev_day_last.get(phase, 0)
-                    # Subtract the previous day's energy reading from the current record
-                    adjusted_energy = energy - prev_value
-                    # If subtraction produces a negative result then use zero instead
-                    if adjusted_energy < 0:
-                        adjusted_energy = 0
+                previous = self._last_energy.get(phase, energy)  # no yesterday: start from first reading
+                self._today_kwh[phase] += max(energy - previous, 0.0)
+                self._last_energy[phase] = energy
 
-                    prev_ts = prev_timestamp_per_phase[phase]
-                    if prev_ts is not None and (dt - prev_ts).total_seconds() > 3:
-                        # Add None to break the line
-                        self.data[phase]["timestamps"].append(dt)
-                        self.data[phase]["Energy_E"].append(np.nan)
-
-                    # Append the datetime and the adjusted energy value to the corresponding phase data
+                prev_ts = self._prev_ts[phase]
+                if prev_ts is not None and (dt - prev_ts).total_seconds() > 3:
+                    # Gap in the data (meter off): break the line instead of drawing across it.
                     self.data[phase]["timestamps"].append(dt)
-                    self.data[phase]["Energy_E"].append(adjusted_energy)
-
-                    # Update last logged id if you need it for further processing
-                    self.last_logged_id = row_id
-
-            # # If needed, further filter or clean the data just in case (for example, if self.data already had older entries)
-            # for phase in phases:
-            #     d = self.data[phase]
-            #     filtered = [
-            #         (t, e) for t, e in zip(d["timestamps"], d["Energy_E"])
-            #         if day_start <= t < day_end
-            #     ]
-            #     self.data[phase]["timestamps"] = [t for t, _ in filtered]
-            #     self.data[phase]["Energy_E"] = [e for _, e in filtered]
+                    self.data[phase]["Energy_E"].append(np.nan)
+                self._prev_ts[phase] = dt
+                self.data[phase]["timestamps"].append(dt)
+                self.data[phase]["Energy_E"].append(self._today_kwh[phase])
 
             self.refresh_plot()
 
         except Exception as e:
-            print(f"[CurrentPage Error] {e}")
+            print(f"[EnergyPage Error] {e}")
 
-        self.after(1000, self.update_data)  # find it Ayush
+        self._job = self.after(1000, self.update_data)
 
     def refresh_plot(self):
         self.ax.clear()
@@ -323,7 +290,7 @@ class EnergyPage(tk.Frame):
             #             )
 
             #     # Time axis setup
-            #     day_start = datetime.combine(date.today(), datetime.min.time()).replace(tzinfo=IST)
+            #     day_start = datetime.combine(datetime.now(IST).date(), datetime.min.time()).replace(tzinfo=IST)
             #     latest_time = max(timestamps)
             #     latest_time_rounded = (latest_time + timedelta(minutes=1)).replace(second=0, microsecond=0)
 
@@ -341,7 +308,7 @@ class EnergyPage(tk.Frame):
             #     self.ax.tick_params(axis='y', labelsize=20)
             #     self.ax.legend(fontsize=20)
 
-            day_start = datetime.combine(date.today(), datetime.min.time()).replace(
+            day_start = datetime.combine(datetime.now(IST).date(), datetime.min.time()).replace(
                 tzinfo=IST
             )
             latest_time = max(timestamps)

@@ -5,7 +5,8 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from datetime import datetime
 
-DB_PATH = "/home/rpi/Desktop/powermeter_working/power_meter_data.db"
+from config import DB_PATH  # was a hard-coded absolute path that differed from the other processes
+
 IST = ZoneInfo("Asia/Kolkata")
 
 
@@ -24,11 +25,21 @@ class PowerFailurePage(tk.Frame):
         )
         refresh_btn.pack(pady=10)
 
+        self._job = None
         self.refresh_data()
+
+    def on_show(self):
+        # refresh_loop existed but was never started, so the log only updated on "Refresh".
+        self.refresh_loop()
+
+    def on_hide(self):
+        if self._job:
+            self.after_cancel(self._job)
+            self._job = None
 
     def refresh_loop(self):
         self.refresh_data()
-        self.after(10000, self.refresh_loop)
+        self._job = self.after(10000, self.refresh_loop)
 
     def refresh_data(self):
         self.ax.clear()

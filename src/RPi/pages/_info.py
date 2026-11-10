@@ -1,3 +1,4 @@
+import os
 import tkinter as tk
 from PIL import Image, ImageTk
 
@@ -23,7 +24,7 @@ class InfoPage(tk.Frame):
         heading.place(x=500, y=30)  # Adjust to center horizontally
 
         # Single member details
-        img_path = r'/home/rpi/Desktop/powermeter_working/pages/cherish.jpg'
+        img_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cherish.jpg')
         name = "Alice Johnson"
         roll = "22b3937"
 

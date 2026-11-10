@@ -8,7 +8,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 BG_COLOR = "#121212"
 
 # Database name
-DB_NAME = "power_meter_data.db"
+from config import DB_PATH as DB_NAME  # one DB path shared by every process
 
 
 class HomePage(tk.Frame):
@@ -27,11 +27,14 @@ class HomePage(tk.Frame):
     def on_show(self):
         print("[HomePage] Active")
         self.update_loop_running = True
-        self.after(100, self.update_table)
+        self._job = self.after(100, self.update_table)
 
     def on_hide(self):
         print("[HomePage] Hidden")
         self.update_loop_running = False
+        if getattr(self, "_job", None):
+            self.after_cancel(self._job)  # don't leave a refresh loop running while hidden
+            self._job = None
 
     def update_table(self):
         if not self.update_loop_running:
@@ -50,7 +53,7 @@ class HomePage(tk.Frame):
                 JOIN (
                   SELECT phase, MAX(id) AS max_id
                   FROM power_data
-                  WHERE phase IN ('A','B','C','Neutral')
+                  WHERE phase IN ('R','Y','B','Neutral')  -- stored names (was 'A','B','C': R/Y never showed)
                   GROUP BY phase
                 ) AS latest
                   ON t.phase = latest.phase AND t.id = latest.max_id
@@ -119,4 +122,4 @@ class HomePage(tk.Frame):
             print(f"[HomePage Error] {e}")
 
         # Update every second.
-        self.after(1000, self.update_table)
+        self._job = self.after(1000, self.update_table)

@@ -1,0 +1,74 @@
+:root {
+  --bg: #f4f5f7;
+  --card: #ffffff;
+  --ink: #1d2330;
+  --muted: #667085;
+  --line: #e3e6ec;
+  --accent: #2f6fde;
+  --danger: #c4372f;
+  --ok: #1f9d55;
+  --R: #d64545;
+  --Y: #c99a06;
+  --B: #2f6fde;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #11141a;
+    --card: #1a1f28;
+    --ink: #e6e9ef;
+    --muted: #98a2b3;
+    --line: #2a313d;
+    --accent: #6ea0ff;
+    --danger: #ff6b61;
+    --ok: #3ccf7e;
+    --R: #ff6b6b;
+    --Y: #f2c94c;
+    --B: #6ea0ff;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; align-items: center; padding: 16px; border-bottom: 1px solid var(--line); background: var(--card); }
+.brand { display: flex; gap: 12px; align-items: center; }
+.logo { font-size: 28px; }
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+h3 { font-size: 13px; margin: 14px 0 6px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+.sub { margin: 0; color: var(--muted); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+.chip.ok { color: var(--ok); border-color: var(--ok); }
+.chip.bad { color: var(--danger); border-color: var(--danger); }
+main { padding: 16px; display: grid; gap: 16px; max-width: 1400px; margin: 0 auto; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+.btnrow { display: flex; flex-wrap: wrap; gap: 8px; }
+button { font: inherit; padding: 6px 12px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--ink); cursor: pointer; }
+button:hover { border-color: var(--accent); }
+button.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.danger { color: var(--danger); }
+.controls { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; align-items: end; }
+label { display: grid; gap: 4px; color: var(--muted); font-size: 12px; margin-top: 8px; }
+label output { color: var(--ink); font-variant-numeric: tabular-nums; }
+label.toggle { display: flex; gap: 8px; align-items: center; color: var(--ink); font-size: 13px; }
+input[type=range] { width: 100%; accent-color: var(--accent); }
+.phases { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.phase { border-top: 4px solid var(--pc); }
+.phase-head { display: flex; justify-content: space-between; align-items: center; }
+.pname { color: var(--pc); margin: 0; }
+.relay { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.led { width: 12px; height: 12px; border-radius: 50%; background: var(--line); box-shadow: inset 0 0 2px #0006; }
+.led.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.modes { display: flex; gap: 6px; margin: 10px 0; flex-wrap: wrap; }
+.readings { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px 10px; padding: 10px; border-radius: 8px; background: var(--bg); }
+.readings div, .stats div { display: flex; flex-direction: column; }
+.k { font-size: 11px; color: var(--muted); }
+.v { font-variant-numeric: tabular-nums; font-weight: 600; }
+.v.small { font-weight: 500; font-size: 12px; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 12px; }
+.appliances { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+.appliances li { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.appliances li .meta { color: var(--muted); font-size: 12px; }
+.appliances li .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line); display: inline-block; margin-right: 6px; }
+.appliances li .dot.on { background: var(--ok); }
+.hint { color: var(--muted); margin: 10px 0 0; font-size: 12px; }
+@media (max-width: 480px) { .readings { grid-template-columns: repeat(2, 1fr); } }

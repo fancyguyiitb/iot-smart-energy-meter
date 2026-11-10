@@ -7,10 +7,11 @@ import matplotlib.dates as mdates
 import threading
 from zoneinfo import ZoneInfo
 
-DB_NAME = "power_meter_data.db"
+from config import DB_PATH as DB_NAME  # one DB path shared by every process
 BTN_BG = "lightgray"
 BTN_SELECTED = "white"
 IST = ZoneInfo("Asia/Kolkata")
+DECIMATE_S = 3  # plot one point per phase every 3 s
 
 
 class CurrentPage(tk.Frame):
@@ -95,7 +96,7 @@ class CurrentPage(tk.Frame):
             callback()
             loading_win.destroy()
 
-        threading.Thread(target=run_and_close).start()
+        self.after(50, run_and_close)  # Tk is not thread-safe: stay on the main thread
 
     def set_value_type(self, vtypes, label=None):
         self.value_types = vtypes
@@ -114,30 +115,38 @@ class CurrentPage(tk.Frame):
     def on_show(self):
         print("[CurrentPage] Active")
         self.update_loop_running = True
-        self.after(100, self.update_data)
+        self._job = self.after(100, self.update_data)
 
     def on_hide(self):
         print("[CurrentPage] Hidden")
         self.update_loop_running = False
+        if getattr(self, "_job", None):
+            self.after_cancel(self._job)  # don't leave a refresh loop running while hidden
+            self._job = None
 
     def update_data(self):
         if not self.update_loop_running:
             return
 
         try:
-            day_start = datetime.combine(date.today(), datetime.min.time()).replace(
+            day_start = datetime.combine(datetime.now(IST).date(), datetime.min.time()).replace(
                 tzinfo=IST
             )
             day_end = day_start + timedelta(days=1)
-            # Prepare the optimized query:
-            #   - Only select rows with id greater than the last processed id.
-            #   - Include only every third row (id % 3 == 0).
-            #   - Filter rows by timestamp so that only today's data is returned.
+            if getattr(self, "_day", None) != day_start:
+                # New day: start a fresh plot instead of growing the lists forever.
+                self._day = day_start
+                self._last_kept = {}
+                for d in self.data.values():
+                    for series in d.values():
+                        series.clear()
+            # Only rows newer than the last processed id, and only today's.
+            # Decimation is by time (one point per phase per DECIMATE_S). The old
+            # `id % 3 = 0` filter silently depended on exactly 4 rows per sample.
             query = """
                     SELECT id, phase, current_rms, voltage_rms, timestamp
                     FROM power_data
                     WHERE id > ?
-                      AND (id % 3) = 0
                       AND timestamp >= ? AND timestamp < ?
                     ORDER BY id ASC
                 """
@@ -153,13 +162,17 @@ class CurrentPage(tk.Frame):
             for row in rows:
                 row_id, phase, current, voltage, timestamp_str = row
 
+                self.last_logged_id = row_id
                 if phase not in self.data:
                     continue
 
                 dt = datetime.fromisoformat(
                     timestamp_str
                 )  # ISO format preserves tzinfo
-                # Append the fetched data directly; extra filtering is now unnecessary
+                last = self._last_kept.get(phase)
+                if last is not None and (dt - last).total_seconds() < DECIMATE_S:
+                    continue
+                self._last_kept[phase] = dt
                 self.data[phase]["timestamps"].append(dt)
                 self.data[phase]["Current_A"].append(current)
                 self.data[phase]["Voltage_V"].append(voltage)
@@ -197,7 +210,7 @@ class CurrentPage(tk.Frame):
         except Exception as e:
             print(f"[CurrentPage Error] {e}")
 
-        self.after(1000, self.update_data)
+        self._job = self.after(1000, self.update_data)
 
     def refresh_plot(self):
         self.ax.clear()
@@ -255,7 +268,7 @@ class CurrentPage(tk.Frame):
             latest_time = max(timestamps)
 
             # Day start for reference
-            day_start = datetime.combine(date.today(), datetime.min.time()).replace(
+            day_start = datetime.combine(datetime.now(IST).date(), datetime.min.time()).replace(
                 tzinfo=IST
             )
 

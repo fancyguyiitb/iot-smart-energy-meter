@@ -1,0 +1,30 @@
+# Local InfluxDB 2.x, to exercise the cloud storage backend before migrating.
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# Then in src/Server/.env:
+#   STORAGE_BACKEND=influx
+#   INFLUXDB_URL=http://127.0.0.1:8086
+#   INFLUXDB_TOKEN=voltix-dev-token
+#   INFLUXDB_ORG=voltix
+#   INFLUXDB_BUCKET=power
+# and run `python scripts/run_local.py` + `python scripts/e2e_check.py`.
+#
+# Dev-only credentials below. Never reuse them in a deployed environment.
+services:
+  influxdb:
+    image: influxdb:2.7.11
+    ports:
+      - "127.0.0.1:8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: voltix
+      DOCKER_INFLUXDB_INIT_PASSWORD: voltix-dev-password
+      DOCKER_INFLUXDB_INIT_ORG: voltix
+      DOCKER_INFLUXDB_INIT_BUCKET: power
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: voltix-dev-token
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+
+volumes:
+  influxdb-data:

@@ -9,7 +9,7 @@ from datetime import datetime
 # plt.style.use('dark_background')
 BG_COLOR = "#121212"
 
-DB_NAME = "power_meter_data.db"
+from config import DB_PATH as DB_NAME  # one DB path shared by every process
 
 
 class THD_and_FreqPage(tk.Frame):
@@ -32,11 +32,14 @@ class THD_and_FreqPage(tk.Frame):
     def on_show(self):
         print("[THDPage] Active")
         self.update_loop_running = True
-        self.after(100, self.update_data)
+        self._job = self.after(100, self.update_data)
 
     def on_hide(self):
         print("[THDPage] Hidden")
         self.update_loop_running = False
+        if getattr(self, "_job", None):
+            self.after_cancel(self._job)  # don't leave a refresh loop running while hidden
+            self._job = None
 
     def update_data(self):
         if not self.update_loop_running:
@@ -99,4 +102,4 @@ class THD_and_FreqPage(tk.Frame):
         except Exception as e:
             print(f"[THDPage Error] {e}")
 
-        self.after(1000, self.update_data)
+        self._job = self.after(1000, self.update_data)

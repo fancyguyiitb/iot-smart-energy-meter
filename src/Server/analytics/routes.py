@@ -1,91 +1,69 @@
-from datetime import datetime
-from zoneinfo import ZoneInfo  # For Python 3.9+
-from fastapi import APIRouter, HTTPException, Query
-from analytics.helpers import (
-    generate_power_analytics,
-    fetch_stored_power_analytics,
-    generate_energy_analytics,
-    fetch_stored_energy_analytics,
-    fetch_energy_data,
-    fetch_power_data,
-)
-from utils.sprint import Logger
+from __future__ import annotations
 
-l = Logger.get_instance(True)
+from datetime import date, datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+
+from analytics.helpers import TZ, daily_energy, energy_analytics, power_analytics
+from api.dependencies import get_current_user, resolve_user_device
+from storage import StorageError
 
 analysis_router = APIRouter()
 
-# Default device and phase values
-DEFAULT_DEVICE_ID = "random12"
 DEFAULT_PHASE = "R"
 
-# Define the target timezone
-INDIA_TZ = ZoneInfo("Asia/Kolkata")
+
+def _date(date_str: str | None) -> date:
+    if not date_str:
+        return datetime.now(TZ).date()
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+
+
+def _guard(fn, *args):
+    try:
+        return fn(*args)
+    except StorageError:
+        raise HTTPException(status_code=503, detail="Storage temporarily unavailable")
 
 
 @analysis_router.get("/power")
-async def get_power_analytics(
-    date_str: str = Query(..., description="Date in YYYY-MM-DD format"),
-    phase: str = Query(DEFAULT_PHASE, description="Phase identifier"),
-    device_id: str = Query(DEFAULT_DEVICE_ID, description="Device ID"),
+def get_power_analytics(
+    date_str: str | None = Query(None, description="Date in YYYY-MM-DD format (default today)"),
+    phase: str = Query(DEFAULT_PHASE, pattern="^(R|Y|B)$"),
+    device_id: str | None = None,
+    every: int = Query(60, ge=1, le=3600),
+    user: dict = Depends(get_current_user),
 ):
-    try:
-        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-    except ValueError:
-        raise HTTPException(
-            status_code=400, detail="Invalid date format. Use YYYY-MM-DD."
-        )
-
-    # Get the current date in Asia/Kolkata timezone
-    current_date = datetime.now(INDIA_TZ).date()
-
-    l.dprint(f"Current date: {current_date}, target date: {target_date}")
-
-    if target_date == current_date:
-        l.dprint("Analytics data accessed for today")
-        analytics_data = generate_power_analytics(target_date, phase, device_id)
-    else:
-        analytics_data = fetch_stored_power_analytics(target_date, phase, device_id)
-
-    power_data = fetch_power_data(target_date, phase, device_id)
-
-    data = {
-        "analytics_data": analytics_data,
-        "power_data": power_data,
-    }
-
-    if not power_data:
-        raise HTTPException(
-            status_code=404, detail="No power data found for this date."
-        )
+    device_id = resolve_user_device(user, device_id)
+    data = _guard(power_analytics, _date(date_str), phase, device_id, every)
+    if not data["power_data"]:
+        raise HTTPException(status_code=404, detail="No power data found for this date.")
     return data
 
 
 @analysis_router.get("/energy")
-async def get_energy_analytics(
-    date_str: str = Query(..., description="Date in YYYY-MM-DD format"),
-    phase: str = Query(DEFAULT_PHASE, description="Phase identifier"),
-    device_id: str = Query(DEFAULT_DEVICE_ID, description="Device ID"),
+def get_energy_analytics(
+    date_str: str | None = Query(None, description="Date in YYYY-MM-DD format (default today)"),
+    phase: str = Query(DEFAULT_PHASE, pattern="^(R|Y|B)$"),
+    device_id: str | None = None,
+    user: dict = Depends(get_current_user),
 ):
-    try:
-        target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-    except ValueError:
-        raise HTTPException(
-            status_code=400, detail="Invalid date format. Use YYYY-MM-DD."
-        )
+    device_id = resolve_user_device(user, device_id)
+    return _guard(energy_analytics, _date(date_str), phase, device_id)
 
-    # Get the current date in Asia/Kolkata timezone
-    current_date = datetime.now(INDIA_TZ).date()
 
-    if target_date == current_date:
-        analytics_data = generate_energy_analytics(target_date, phase, device_id)
-    else:
-        analytics_data = fetch_stored_energy_analytics(target_date, phase, device_id)
-
-    energy_data = fetch_energy_data(target_date, phase, device_id)
-
-    data = {
-        "analytics_data": analytics_data,
-        "energy_data": energy_data,
-    }
-    return data
+@analysis_router.get("/energy-daily")
+def get_daily_energy(
+    month: str | None = Query(None, pattern=r"^\d{4}-\d{2}$", description="YYYY-MM (default this month)"),
+    device_id: str | None = None,
+    user: dict = Depends(get_current_user),
+):
+    device_id = resolve_user_device(user, device_id)
+    today = datetime.now(TZ).date()
+    year, mon = (int(month[:4]), int(month[5:])) if month else (today.year, today.month)
+    if not 1 <= mon <= 12:
+        raise HTTPException(status_code=400, detail="Invalid month")
+    return _guard(daily_energy, year, mon, device_id)

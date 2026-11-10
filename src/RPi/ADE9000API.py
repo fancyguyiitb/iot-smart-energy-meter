@@ -1,6 +1,8 @@
-import spidev
 import time
-from smbus2 import SMBus
+
+# Real spidev on the Pi, the virtual meter board elsewhere (see hal/__init__.py).
+# (The unused smbus2 import was dropped: it only imports on Linux.)
+from hal import spi as spidev
 from ADE9000API_header import *
 from ADE9000CalibrationInputs import *
 from ADE9000RegMap import *
@@ -234,14 +236,18 @@ class ADE9000:
         }
 
     def read_power_factor_regs_values(self):
-        """Reads Power Factor registers and calculates PF"""
+        """Reads Power Factor registers and calculates PF.
+
+        xPF is signed (2^27 = 1.0, sign follows active power). Without sign extension
+        a PF of -0.99 (export) decoded as ~31.
+        """
         return {
             "PowerFactorReg_A": (reg_A := self.spi_read_32(ADDR_APF)),
-            "PowerFactorValue_A": reg_A / 134217728,
+            "PowerFactorValue_A": sign_extend_32(reg_A) / 134217728,
             "PowerFactorReg_B": (reg_B := self.spi_read_32(ADDR_BPF)),
-            "PowerFactorValue_B": reg_B / 134217728,
+            "PowerFactorValue_B": sign_extend_32(reg_B) / 134217728,
             "PowerFactorReg_C": (reg_C := self.spi_read_32(ADDR_CPF)),
-            "PowerFactorValue_C": reg_C / 134217728,
+            "PowerFactorValue_C": sign_extend_32(reg_C) / 134217728,
         }
 
     def read_period_regs_values(self):
@@ -258,7 +264,9 @@ class ADE9000:
 
     def read_angle_regs_values(self):
         accmode = self.spi_read_16(ADDR_ACCMODE)
-        mul_constant = 0.02109375 if (accmode & 0x0100) >= 0 else 0.017578125
+        # ACCMODE bit 8 (SELFREQ): 1 = 60 Hz system, 0 = 50 Hz. The old test
+        # `(accmode & 0x0100) >= 0` was always true, so 50 Hz angles were scaled as 60 Hz.
+        mul_constant = 0.02109375 if (accmode & 0x0100) else 0.017578125
 
         angle_data = {}
         for angle, addr in {
@@ -291,22 +299,28 @@ class ADE9000:
         return {"Temperature_Reg": temp_reg, "Temperature": temp_value}
 
     def read_energy_watthr_reg_value(self):
-        """ Reads the Energy Watt hour for all phases"""
+        """Reads the accumulated active energy (Wh) for all phases.
 
+        CAL_ENERGY_CC is in uWh per xWATTHR_HI code, so energy = signed(HI) * CC.
+        The old code shifted HI left by 32 bits for phases B/C (2^32 times too large)
+        and did not sign-extend phase A.
+        """
         return {
-        "WATTHR_A":  (self.spi_read_32(ADDR_AWATTHR_HI)) * 1.34757 * 10**(-6),
-        "WATTHR_B": ((sign_extend_to_64(self.spi_read_32(ADDR_BWATTHR_HI)) << 32) + sign_extend_to_64(self.spi_read_32(ADDR_BWATTHR_LO))) * 1.34757 * 10**-6,
-        "WATTHR_C": ((sign_extend_to_64(self.spi_read_32(ADDR_CWATTHR_HI)) << 32) + sign_extend_to_64(self.spi_read_32(ADDR_CWATTHR_LO))) * 1.34757 * 10**-6,
-    }
-
-
+            f"WATTHR_{ph}": sign_extend_32(self.spi_read_32(reg)) * CAL_ENERGY_CC * 10**(-6)
+            for ph, reg in (("A", ADDR_AWATTHR_HI), ("B", ADDR_BWATTHR_HI), ("C", ADDR_CWATTHR_HI))
+        }
 
 
 def sign_extend_32(val):
-    return - val + (1 << 32) if val & (1 << 31) else val
+    """Interpret a 32-bit register value as two's-complement signed.
+
+    The old version returned ``-val + 2**32`` - the *magnitude* - so negative active
+    power (export, or a CT clamped backwards) was reported as positive consumption.
+    """
+    return val - (1 << 32) if val & (1 << 31) else val
 
 def sign_extend_for_VAr_32(val):
-    return val - (1 << 32) if val & (1 << 31) else val
+    return sign_extend_32(val)
 
 def sign_extend_to_64(value):
     """Sign extends a 32-bit signed integer to a 64-bit signed integer."""

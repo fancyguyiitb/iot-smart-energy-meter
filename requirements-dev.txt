@@ -1,0 +1,6 @@
+# Everything needed to run the whole system locally (server + virtual device + firmware) and the tests.
+-r src/Server/requirements.txt
+-r src/RPi/requirements.txt
+-r src/VirtualDevice/requirements.txt
+pytest==8.3.4
+httpx==0.28.1

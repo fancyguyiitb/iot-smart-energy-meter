@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voltix Virtual Board</title>
+  <link rel="stylesheet" href="/static/panel.css">
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">⚡</span>
+      <div>
+        <h1>Voltix virtual meter board</h1>
+        <p class="sub">The physical world the firmware measures: grid, wiring, relays and appliances.</p>
+      </div>
+    </div>
+    <div class="chips">
+      <span class="chip" id="chip-dsp">ADE9000 DSP: –</span>
+      <span class="chip" id="chip-fw">Firmware: –</span>
+      <span class="chip" id="chip-spi">SPI: – frames/s</span>
+    </div>
+  </header>
+
+  <main>
+    <section class="card" id="scenarios">
+      <h2>Scenarios</h2>
+      <div class="btnrow">
+        <button data-scenario="normal">Normal day</button>
+        <button data-scenario="evening_peak">Evening peak</button>
+        <button data-scenario="night">Night</button>
+        <button data-scenario="imbalanced">Imbalanced phases</button>
+        <button data-scenario="brownout">Brown-out (all sag)</button>
+        <button data-scenario="phase_loss_y">Lose phase Y</button>
+        <button data-scenario="blackout">Blackout</button>
+        <button data-scenario="loose_neutral">Loose neutral</button>
+        <button data-scenario="harmonics">Harmonic-heavy</button>
+        <button data-scenario="solar_export">Solar export on R</button>
+        <button data-scenario="reversed_ct">Reversed CT on B</button>
+      </div>
+    </section>
+
+    <section class="card" id="grid">
+      <h2>Grid</h2>
+      <div class="controls">
+        <label>Frequency <output id="out-freq">50.00 Hz</output>
+          <input type="range" id="in-freq" min="48" max="52" step="0.05" value="50">
+        </label>
+        <label>Background voltage THD <output id="out-vthd">2.0 %</output>
+          <input type="range" id="in-vthd" min="0" max="15" step="0.5" value="2">
+        </label>
+        <label>Loose neutral severity <output id="out-ln">0.00</output>
+          <input type="range" id="in-ln" min="0" max="1" step="0.05" value="0">
+        </label>
+        <label class="toggle"><input type="checkbox" id="in-noise" checked> Measurement noise</label>
+      </div>
+    </section>
+
+    <section id="phases" class="phases"></section>
+
+    <section class="card" id="totals">
+      <h2>Installation totals</h2>
+      <div class="stats">
+        <div><span class="k">Total active power</span><span class="v" id="tot-p">–</span></div>
+        <div><span class="k">Neutral current</span><span class="v" id="tot-n">–</span></div>
+        <div><span class="k">True energy imported</span><span class="v" id="tot-e">–</span></div>
+        <div><span class="k">Chip energy accumulators (WATTHR)</span><span class="v small" id="tot-acc">–</span></div>
+      </div>
+      <div class="btnrow">
+        <button id="btn-reset-truth">Reset true-energy counters</button>
+        <button id="btn-power-cycle" class="danger">Power-cycle board (chip forgets config)</button>
+      </div>
+      <p class="hint">Ground truth is what really flows in the wires. Compare it with the web app to check the
+        firmware's accuracy end to end.</p>
+    </section>
+  </main>
+
+  <template id="phase-template">
+    <article class="card phase">
+      <div class="phase-head">
+        <h2 class="pname"></h2>
+        <div class="relay"><span class="led"></span><span class="relay-text"></span></div>
+      </div>
+      <div class="modes">
+        <button data-mode="normal">Normal</button>
+        <button data-mode="sag">Sag</button>
+        <button data-mode="swell">Swell</button>
+        <button data-mode="outage">Outage</button>
+      </div>
+      <div class="readings">
+        <div><span class="k">V</span><span class="v" data-f="voltage"></span></div>
+        <div><span class="k">I</span><span class="v" data-f="current"></span></div>
+        <div><span class="k">P</span><span class="v" data-f="active_w"></span></div>
+        <div><span class="k">Q</span><span class="v" data-f="reactive_var"></span></div>
+        <div><span class="k">S</span><span class="v" data-f="apparent_va"></span></div>
+        <div><span class="k">PF</span><span class="v" data-f="pf"></span></div>
+        <div><span class="k">THD V</span><span class="v" data-f="voltage_thd"></span></div>
+        <div><span class="k">THD I</span><span class="v" data-f="current_thd"></span></div>
+        <div><span class="k">f</span><span class="v" data-f="frequency"></span></div>
+        <div><span class="k">Import</span><span class="v" data-f="energy_import_wh"></span></div>
+        <div><span class="k">Export</span><span class="v" data-f="energy_export_wh"></span></div>
+      </div>
+      <label>Extra load (negative = solar) <output class="out-custom">0.0 kW</output>
+        <input type="range" class="in-custom" min="-5" max="10" step="0.1" value="0">
+      </label>
+      <label class="toggle"><input type="checkbox" class="in-ct"> CT clamped backwards</label>
+      <h3>Appliances</h3>
+      <ul class="appliances"></ul>
+    </article>
+  </template>
+
+  <script src="/static/panel.js"></script>
+</body>
+</html>

@@ -5,6 +5,60 @@
 <!-- DON'T MODIFY ANYTHING ABOVE -->
 <!-- Modify from here -->
 
+## Run it locally (no hardware needed)
+
+The whole system runs on one machine. A **virtual meter board** stands in for the ADE9000 chip, the relays and the house wiring. The unmodified firmware talks to it through a hardware-abstraction layer.
+
+```bash
+python -m venv .venv
+.venv/Scripts/activate            # Windows  (macOS/Linux: source .venv/bin/activate)
+pip install -r requirements-dev.txt
+
+python scripts/run_local.py       # add --gui for the meter's touchscreen UI
+```
+
+| Open | What it is |
+|---|---|
+| http://127.0.0.1:8000/app/ | Web app: live readings, energy use, analysis, power quality, remote control |
+| http://127.0.0.1:9000/ | Virtual board: switch appliances, inject sags/outages/loose neutral/solar export, watch relays and ground truth |
+| http://127.0.0.1:8000/docs | API reference |
+
+On first start the launcher prints a one-time sign-up link that registers the meter to a new account. Run `python src/RPi/claim.py` for a fresh one.
+
+```bash
+python scripts/run_tests.py       # unit + regression tests (firmware and server)
+python scripts/e2e_check.py       # end-to-end checks against the running stack
+```
+
+### How it fits together
+
+```
+ Virtual board (src/VirtualDevice)          Firmware (src/RPi)                    Server (src/Server)          Web app (src/WebApp)
+ physics: grid, loads, faults   <-SPI-  api.py      sampler -> SQLite (WAL)    sync.py --HTTPS batches-->  /api/write-data
+ emulated ADE9000 registers             sync.py     store-and-forward                                       SQLite (local) | InfluxDB (cloud)
+ relay contacts on GPIO 17/27/22 <-GPIO- relay.py   <---------- WebSocket (device key) ------------>  /ws  <- /remote-control <- browser
+                                        failure_log.py, app.py (Tk touchscreen)                         /auth, /api, /analytics -> browser
+```
+
+On the real Pi, set `VOLTIX_HAL=hardware` in `src/RPi/device.env` and the same firmware uses `spidev` and `RPi.GPIO`.
+
+### Repository layout
+
+| Path | Contents |
+|---|---|
+| `src/RPi/` | Meter firmware: sampler, sync, relay control, failure logger, touchscreen GUI, ADE9000 driver, `hal/` (real or virtual hardware) |
+| `src/VirtualDevice/` | Virtual meter board: physical model, register-level ADE9000 emulation, control panel |
+| `src/Server/` | FastAPI backend: auth, ingest, analytics, device WebSocket, `storage/` (SQLite or InfluxDB), `manage.py` |
+| `src/WebApp/` | Browser client (reference client while the Flutter source is missing) |
+| `src/Application/` | Flutter project scaffold (the Dart `lib/` was lost to a `.gitignore` rule, see `docs/BUGFIXES.md`) |
+| `scripts/` | `run_local.py`, `run_tests.py`, `e2e_check.py` |
+| `tests/` | Firmware and server regression tests |
+| `docs/BUGFIXES.md` | Every bug fixed, where, and the test that covers it |
+| `deploy/` | InfluxDB compose file for trying the cloud storage backend |
+| `pcb/`, `3d_models/`, `reports/`, `others/`, `bom.xls` | Hardware design files and project reports |
+
+---
+
 # Project Overview
 
 ### Project Name: [IOT Enabled 3-Phase Power Quality and Energy Meter]()

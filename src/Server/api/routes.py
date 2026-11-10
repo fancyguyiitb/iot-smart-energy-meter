@@ -1,350 +1,138 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import JSONResponse
-from influxdb_client import Point, WritePrecision
-from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
-from utils.database import write_api, query_api
-from utils.security import verify_token
-from config import settings
-from utils.sprint import Logger
+"""Data API: device ingest + user-facing queries.
 
+Fixes compared with the original version:
+* Every route is authenticated: devices with their key, users with a JWT, and users can
+  only see meters they own (``device_id`` was a free query parameter).
+* ``/fetch-all`` is gone: it returned the whole bucket - including every user's plaintext
+  password - to anyone. ``/fetch-analytics`` (read a measurement nothing wrote) too.
+* Ingest validates each reading; timestamps are parsed properly instead of falling back
+  to ``now()`` (which collapsed each batch onto one timestamp and lost ~90% of the data).
+  Invalid rows are reported and skipped instead of failing the whole batch, so one bad
+  row can't block the device's sync forever.
+* Writes are durable before 201 is returned (see storage.influx_store); storage failures
+  return 503 so the device keeps the rows and retries.
+* Routes are plain ``def`` so blocking storage calls run in FastAPI's threadpool instead
+  of freezing the event loop (and every WebSocket with it).
+"""
+
+from __future__ import annotations
+
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import ValidationError
+
+from api.dependencies import get_current_device, get_current_user, resolve_user_device
+from api.services import hub
+from config import settings
+from storage import StorageError, get_store
+from utils.database import get_metadata_db
+from utils.models import READING_FIELDS, Reading
+from utils.sprint import Logger
 
 l = Logger.get_instance(True)
 router = APIRouter()
-BUCKET = settings.influxdb_bucket
-ORG = settings.influxdb_org
-
-INDIA_TZ = ZoneInfo("Asia/Kolkata")
+TZ = ZoneInfo(settings.timezone)
 
 
-@router.post("/write-data")
-async def write_data(power_data: list[dict] = None):
-    """Batch write power and energy data to InfluxDB."""
-    device_id = "random12"
-    points = []
-    time_now = datetime.now(timezone.utc)
+def day_bounds(date_str: str | None) -> tuple[datetime, datetime]:
+    """UTC start/end of a local calendar day (default: today)."""
+    try:
+        d = date.fromisoformat(date_str) if date_str else datetime.now(TZ).date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD.")
+    start = datetime.combine(d, time.min, tzinfo=TZ)
+    return start.astimezone(timezone.utc), (start + timedelta(days=1)).astimezone(timezone.utc)
 
-    if not power_data:
+
+def _store_call(fn, *args, **kwargs):
+    try:
+        return fn(*args, **kwargs)
+    except StorageError as e:
+        l.eprint(f"Storage error: {e}")
+        raise HTTPException(status_code=503, detail="Storage temporarily unavailable")
+
+
+# ---------------------------------------------------------------------- device endpoints
+@router.post("/write-data", status_code=201)
+def write_data(payload: list[dict] = Body(...), device: dict = Depends(get_current_device)):
+    """Batch ingest from a device. Body: a list of readings (see utils.models.Reading)."""
+    if not payload:
         raise HTTPException(status_code=400, detail="No data provided.")
-
-    for p in power_data:
+    if len(payload) > settings.max_batch_size:
+        raise HTTPException(status_code=413, detail=f"Batch too large (max {settings.max_batch_size})")
+    readings, rejected = [], []
+    for i, item in enumerate(payload):
         try:
-            timestamp = datetime.strptime(p["time"], "%Y-%m-%dT%H:%M:%S.%fZ")
-        except (KeyError, ValueError, TypeError):
-            timestamp = time_now  # Fallback if missing or invalid format
-
-        try:
-            point = (
-                Point("power_data")
-                .tag("device_id", device_id)
-                .tag("phase", p["phase"])
-                .field("power_watt", float(p["power_watt"]))
-                .field("power_var", float(p["power_var"]))
-                .field("power_va", float(p["power_va"]))
-                .field("voltage_rms", float(p["voltage_rms"]))
-                .field("current_rms", float(p["current_rms"]))
-                .field("power_factor", float(p["power_factor"]))
-                .field("voltage_thd", float(p["voltage_thd"]))
-                .field("current_thd", float(p["current_thd"]))
-                .field("energy_kwh", float(p["energy_kwh"]))
-                .field("voltage_freq", float(p["voltage_freq"]))
-                .time(timestamp, WritePrecision.NS)
-            )
-            points.append(point)
-        except KeyError as e:
-            raise HTTPException(
-                status_code=400, detail=f"Missing required field: {str(e)}"
-            )
-
-    if not points:
-        raise HTTPException(status_code=400, detail="No valid data to write.")
-
-    try:
-        l.dprint("Writing data to InfluxDB..., points: ", points)
-        write_api.write(bucket=BUCKET, org=ORG, record=points)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to write data: {str(e)}")
-
-    return JSONResponse(
-        content={"message": "Data written successfully."}, status_code=201
-    )
-
-
-@router.get("/query-data/")
-async def query_data(
-    range_hours: int = 240,
-    device_id: str = "random12",
-    date_str: str = Query(description="Date in YYYY-MM-DD format"),
-):
-    """Query power and energy data for a specific device, grouped by phase."""
-
-    if date_str:
-        try:
-            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        except Exception as e:
-            return JSONResponse(
-                content={"message": f"Invalid date format: {e}"}, status_code=400
-            )
-
-        # Use consistent timezone conversion
-        start_dt = datetime.combine(target_date, datetime.min.time()).replace(
-            tzinfo=INDIA_TZ
-        )
-        end_dt = start_dt + timedelta(days=1)
-
-        start_iso = start_dt.astimezone(ZoneInfo("UTC")).isoformat()
-        end_iso = end_dt.astimezone(ZoneInfo("UTC")).isoformat()
-
-        range_clause = f"range(start: {start_iso}, stop: {end_iso})"
-    elif range_hours is not None:
-        range_clause = f"range(start: -{range_hours}h)"
-    else:
-        range_clause = "range(start: -24h)"
-
-    # Flux Query
-    query = f"""
-    from(bucket: "{BUCKET}")
-      |> {range_clause}
-      |> filter(fn: (r) => r.device_id == "{device_id}")
-      |> group(columns: ["phase"])  // Group by phase
-      |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")  // Pivot for structured output
-      |> keep(columns: ["_time", "phase", "power_watt", "voltage_rms", "current_rms", "energy_kwh"])  // Keep only relevant fields
-    """
-
-    tables = query_api.query(query, org=ORG)
-    formatted_results = {}
-
-    for table in tables:
-        for record in table.records:
-            phase = record.values.get("phase", "Unknown")
-            if phase not in formatted_results:
-                formatted_results[phase] = []
-
-            formatted_results[phase].append(
-                {
-                    "timestamp": record.values.get("_time").isoformat(),
-                    "power_watt": record.values.get("power_watt", None),
-                    "voltage_rms": record.values.get("voltage_rms", None),
-                    "current_rms": record.values.get("current_rms", None),
-                    "energy_kwh": record.values.get("energy_kwh", None),
-                }
-            )
-
-    return JSONResponse(content=formatted_results, status_code=200)
-
-
-@router.get("/fetch-analytics/")
-async def fetch_analytics(device_id: str):
-    """Fetch analytics data for a given device."""
-    query = f"""
-    from(bucket: "{BUCKET}")
-      |> range(start: -30d)
-      |> filter(fn: (r) => r._measurement == "analytics_data")
-      |> filter(fn: (r) => r.device_id == "{device_id}")
-    """
-    tables = query_api.query(query, org=ORG)
-    analytics_results = {}
-
-    for table in tables:
-        for record in table.records:
-            field = record.get_field()
-            value = record.get_value()
-            analytics_results[field] = value
-
-    return JSONResponse(content=analytics_results, status_code=200)
-
-
-@router.get("/fetch-all")
-async def fetch_all_data():
-    """Fetch all data in the InfluxDB bucket without authentication for testing"""
-
-    query = f"""
-    from(bucket: "{BUCKET}")
-      |> range(start: -30d)  // Fetch last 30 days of data
-    """
-
-    tables = query_api.query(query, org=ORG)
-
-    results = []
-
-    for table in tables:
-        for record in table.records:
-            results.append(
-                {
-                    "measurement": record.get_measurement(),
-                    "device_id": record.values.get("device_id"),
-                    "field": record.values.get("_field"),
-                    "value": record.get_value(),
-                    "time": record.get_time(),
-                }
-            )
-
-    return {"data": results}
-
-
-@router.get("/latest-values")
-async def get_latest_values():
-    """Get the latest values of voltage, current, and power for each phase (A, B, C) of the device."""
-    device_id = "random12"
-    query = f'''
-    
-    from(bucket: "{BUCKET}")
-    |> range(start: -1y)  // Consider last 1 hour
-    |> filter(fn: (r) => r.device_id == "{device_id}")
-    |> filter(fn: (r) => r._measurement == "power_data")
-    |> filter(fn: (r) => r._field == "voltage_rms" or r._field == "current_rms" or r._field == "power_watt")
-    |> sort(columns: ["_time"], desc: true)  // Sort by time descending to get the latest values first
-    |> first()  // Take the latest value per field
-    |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")  // Pivot for structured output
-    |> keep(columns: ["_time", "phase", "voltage_rms", "current_rms", "power_watt", "voltage_freq"])  // Keep only relevant columns
-    '''
-
-    tables = query_api.query(query, org=ORG)
-    latest_values = {}
-
-    for table in tables:
-        for record in table.records:
-            l.dprint("Record: ", record.values)
-            phase = record.values.get("phase")
-            if not phase:
-                continue  # Skip if phase is missing
-            latest_values[phase] = {
-                "timestamp": record.values.get("_time").isoformat(),
-                "voltage": record.values.get("voltage_rms"),
-                "current": record.values.get("current_rms"),
-                "power": record.values.get("power_watt"),
-                "viltage_freq": record.values.get("voltage_freq"),
-            }
-
-    if not latest_values:
-        return JSONResponse(
-            content={"message": "No data found for the device."}, status_code=404
-        )
-
-    return JSONResponse(content=latest_values, status_code=200)
-
-
-@router.get("/thd-values")
-async def get_thd_data(range_hours: int = None, date_str: str = None):
-    """Get the THD values of all three phases."""
-    device_id = "random12"
-
-    if date_str:
-        try:
-            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        except Exception as e:
-            return JSONResponse(
-                content={"message": f"Invalid date format: {e}"}, status_code=400
-            )
-
-        # Use consistent timezone conversion
-        start_dt = datetime.combine(target_date, datetime.min.time()).replace(
-            tzinfo=INDIA_TZ
-        )
-        end_dt = start_dt + timedelta(days=1)
-
-        start_iso = start_dt.astimezone(ZoneInfo("UTC")).isoformat()
-        end_iso = end_dt.astimezone(ZoneInfo("UTC")).isoformat()
-
-        range_clause = f"range(start: {start_iso}, stop: {end_iso})"
-    elif range_hours is not None:
-        range_clause = f"range(start: -{range_hours}h)"
-    else:
-        range_clause = "range(start: -24h)"
-
-    query = f'''
-    from(bucket: "{BUCKET}")
-      |> {range_clause}
-      |> filter(fn: (r) => r.device_id == "{device_id}")
-      |> filter(fn: (r) => r._measurement == "power_data")
-      |> group(columns: ["phase"])  // Group by phase
-      |> pivot(rowKey:["_time"], columnKey: ["_field"], valueColumn: "_value")  // Pivot for structured output
-      |> keep(columns: ["_time", "phase", "power_factor", "voltage_thd", "current_thd", "voltage_freq"])  // Keep only relevant fields
-    '''
-
-    tables = query_api.query(query, org=ORG)
-    latest_values = {}
-
-    for table in tables:
-        for record in table.records:
-            l.dprint("Record: ", record.values)
-            phase = record.values.get("phase")
-            if not phase:
-                continue  # Skip if phase is missing
-
-            data_point = {
-                "timestamp": record.values.get("_time").isoformat(),
-                "voltage_thd": record.values.get("voltage_thd"),
-                "current_thd": record.values.get("current_thd"),
-                "power_factor": record.values.get("power_factor"),
-                "voltage_freq": record.values.get("voltage_freq"),
-            }
-            if phase not in latest_values:
-                latest_values[phase] = [data_point]
-            else:
-                latest_values[phase].append(data_point)
-
-    if not latest_values:
-        return JSONResponse(
-            content={"message": "No data found for the device."}, status_code=404
-        )
-
-    return JSONResponse(content=latest_values, status_code=200)
-
-
-@router.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    # check the influxdb_client connection
-    test_query = f"""
-    from(bucket: "{BUCKET}")
-      |> range(start: -1m)
-    """
-    try:
-        tables = query_api.query(query=test_query, org=ORG)
-    except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Failed to connect to InfluxDB: {str(e)}"
-        )
-
-    return JSONResponse(content={"message": "connection OK."}, status_code=200)
+            readings.append(Reading.model_validate(item))
+        except ValidationError as e:
+            rejected.append({"index": i, "error": e.errors(include_url=False, include_input=False)[0]["msg"]})
+    if rejected:
+        l.eprint(f"{device['device_id']}: rejected {len(rejected)}/{len(payload)} readings, e.g. {rejected[0]}")
+    accepted = _store_call(get_store().write_readings, device["device_id"], readings) if readings else 0
+    return {"message": "Data written successfully.", "accepted": accepted, "rejected": rejected}
 
 
 @router.get("/last-energy-data")
-async def get_last_energy_val():
-    """Fetches and sends last `energy_kwh` value"""
+def get_last_energy_val(device: dict = Depends(get_current_device)):
+    """Latest cumulative energy per phase, used by the device to resume after a restart."""
+    return _store_call(get_store().last_energy, device["device_id"])
 
-    device_id = "random12"  # FIXME: Change all of this later.
-    query = f'''
-        from(bucket: "{BUCKET}")
-        |> range(start: -1y)  // Consider last 1 hour
-        |> filter(fn: (r) => r.device_id == "{device_id}")
-        |> filter(fn: (r) => r._measurement == "power_data")
-        |> filter(fn: (r) => r._field == "energy_kwh")
-        |> sort(columns: ["_time"], desc: true)  // Sort by time descending to get the latest values first
-        |> first()  // Take the latest value per field
-        |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")  // Pivot for structured output
-        |> keep(columns: ["_time", "phase", "energy_kwh"])  // Keep only relevant columns
-        '''
 
-    tables = query_api.query(query, org=ORG)
+# ---------------------------------------------------------------------- user endpoints
+@router.get("/devices")
+def list_devices(user: dict = Depends(get_current_user)):
+    return [d | hub.status(d["device_id"]) for d in get_metadata_db().devices_for_user(user["id"])]
 
-    energy_values = {}
 
-    for table in tables:
-        for record in table.records:
-            l.dprint("Record: ", record.values)
-            phase = record.values.get("phase")
-            if not phase:
-                continue  # Skip if phase is missing
-            energy_values[phase] = {
-                "timestamp": record.values.get("_time").isoformat(),
-                "energy_kwh": record.values.get("energy_kwh"),
-            }
+@router.get("/latest-values")
+def get_latest_values(device_id: str | None = None, user: dict = Depends(get_current_user)):
+    """Newest reading per phase (R, Y, B, Neutral) with its age in seconds."""
+    device_id = resolve_user_device(user, device_id)
+    latest = _store_call(get_store().latest, device_id)
+    now = datetime.now(timezone.utc)
+    for row in latest.values():
+        row["age_s"] = round((now - datetime.fromisoformat(row["timestamp"])).total_seconds(), 1)
+    return latest
 
-    if not energy_values:
-        return JSONResponse(
-            content={"message": "No data found for the device."}, status_code=404
-        )
 
-    return JSONResponse(content=energy_values, status_code=200)
+@router.get("/series")
+def get_series(
+    fields: str = Query(..., description="Comma-separated, e.g. power_watt,power_var"),
+    date_str: str | None = Query(None, description="YYYY-MM-DD (local), default today"),
+    phase: str | None = Query(None, pattern="^(R|Y|B|Neutral)$"),
+    every: int = Query(60, ge=1, le=86400, description="Average over buckets of this many seconds"),
+    device_id: str | None = None,
+    user: dict = Depends(get_current_user),
+):
+    wanted = [f.strip() for f in fields.split(",") if f.strip()]
+    unknown = [f for f in wanted if f not in READING_FIELDS]
+    if unknown or not wanted:
+        raise HTTPException(status_code=400, detail=f"Unknown fields {unknown}; allowed: {list(READING_FIELDS)}")
+    device_id = resolve_user_device(user, device_id)
+    start, end = day_bounds(date_str)
+    return _store_call(get_store().series, device_id, start, end, wanted, phase, every)
+
+
+@router.get("/query-data")
+def query_data(date_str: str | None = None, every: int = Query(60, ge=1, le=86400),
+               device_id: str | None = None, user: dict = Depends(get_current_user)):
+    """Power, voltage, current and energy for a day, grouped by phase."""
+    return get_series("power_watt,voltage_rms,current_rms,energy_kwh", date_str, None, every, device_id, user)
+
+
+@router.get("/thd-values")
+def get_thd_data(date_str: str | None = None, every: int = Query(60, ge=1, le=86400),
+                 device_id: str | None = None, user: dict = Depends(get_current_user)):
+    """THD, power factor and frequency for a day, grouped by phase."""
+    return get_series("voltage_thd,current_thd,power_factor,voltage_freq", date_str, None, every, device_id, user)
+
+
+@router.get("/health")
+def health_check():
+    try:
+        get_store().ping()
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Storage unreachable: {e}")
+    return {"message": "connection OK.", "storage": settings.storage_backend}

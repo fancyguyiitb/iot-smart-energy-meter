@@ -10,7 +10,7 @@ import numpy as np  # ensure this is imported at the top if not already
 from calendar import monthrange
 import threading
 
-DB_NAME = "power_meter_data.db"
+from db import get_daily_energy
 BTN_BG = "lightgray"
 BTN_SELECTED = "white"
 IST = ZoneInfo("Asia/Kolkata")
@@ -144,56 +144,19 @@ class HistoryPage(tk.Frame):
             month_idx = month_names.index(self.month_var.get()) + 1
             year = int(self.year_var.get())
 
-            # Start and end of selected month
-            start_date = datetime(year, month_idx, 1, tzinfo=IST)
             last_day = monthrange(year, month_idx)[1]
-            end_date = datetime(year, month_idx, last_day, 23, 59, 59, tzinfo=IST)
 
-            with sqlite3.connect(DB_NAME) as conn:
-                cursor = conn.cursor()
-                cursor.execute(
-                    """
-                    SELECT phase, energy_kwh, timestamp FROM power_data
-                    WHERE timestamp BETWEEN ? AND ?
-                    ORDER BY timestamp ASC
-                """,
-                    (start_date.isoformat(), end_date.isoformat()),
-                )
-                rows = cursor.fetchall()
+            # The sampler keeps one kWh total per day and phase in `daily_energy`
+            # (tiny, never pruned). The old version scanned every raw row of the month on
+            # the Tk thread, and lost all history once raw rows were pruned.
+            daily = get_daily_energy(f"{year:04d}-{month_idx:02d}-01", f"{year:04d}-{month_idx:02d}-{last_day:02d}")
 
-            # Initialize daily_energy dict with 0 for all days for each phase
             self.data = {ph: {"timestamps": [], "energy": []} for ph in ["R", "Y", "B"]}
-            daily_energy = {ph: {} for ph in ["R", "Y", "B"]}
-
-            for day in range(1, last_day + 1):
-                dt = datetime(year, month_idx, day, tzinfo=IST).date()
-                for ph in ["R", "Y", "B"]:
-                    daily_energy[ph][dt] = {"start": None, "end": None}
-
-            for phase, energy, timestamp_str in rows:
-                if phase not in daily_energy:
-                    continue
-                dt = datetime.fromisoformat(timestamp_str).astimezone(IST)
-                day_key = dt.date()
-                if day_key not in daily_energy[phase]:
-                    continue
-                if daily_energy[phase][day_key]["start"] is None:
-                    daily_energy[phase][day_key]["start"] = energy
-                    daily_energy[phase][day_key]["end"] = energy
-                else:
-                    daily_energy[phase][day_key]["end"] = energy
-
             for phase in ["R", "Y", "B"]:
-                for d in sorted(daily_energy[phase]):
-                    readings = daily_energy[phase][d]
-                    if readings["start"] is None:
-                        net_energy = 0
-                    else:
-                        net_energy = max(readings["end"] - readings["start"], 0)
-                    self.data[phase]["timestamps"].append(
-                        datetime.combine(d, datetime.min.time(), tzinfo=IST)
-                    )
-                    self.data[phase]["energy"].append(net_energy)
+                for day in range(1, last_day + 1):
+                    d = date(year, month_idx, day)
+                    self.data[phase]["timestamps"].append(datetime.combine(d, datetime.min.time(), tzinfo=IST))
+                    self.data[phase]["energy"].append(daily.get(phase, {}).get(d.isoformat(), 0.0))
 
             self.refresh_plot()
 

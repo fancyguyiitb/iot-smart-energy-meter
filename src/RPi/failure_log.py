@@ -1,120 +1,87 @@
-# voltage_monitor.py
-import time
-import sqlite3
-from datetime import datetime
-from zoneinfo import ZoneInfo
-import live_data
-import os
+"""Power-failure logger: records when a phase loses supply.
+
+Reads the live voltages the sampler (api.py) publishes to ``live_data.json``.
+
+Fixes compared with the original version:
+* Removed ``import live_data`` (no such module, so the script could not start).
+* Uses R/Y/B keys end to end. The sampler wrote raw chip keys (A/B/C) and this script
+  looked for R/Y/B, so R and Y were never detected and "B" held phase Y's voltage.
+* Ignores stale data: if the sampler stops, the last voltages are not trusted forever.
+* Keeps the last 5 failures per phase (the comment said 5, the query kept 1).
+* Shares the DB path with every other process via config.py.
+"""
+
+from __future__ import annotations
+
 import json
+import time
+from datetime import datetime
 
-DB_PATH = "/home/rpi/Desktop/powermeter_working/power_meter_data.db"
-IST = ZoneInfo("Asia/Kolkata")
-JSON_PATH = "live_data.json"  # This JSON file will act like our shared data source
-FLAG_FILE = "failure_flags.json"  # <-- NEW: Persistent storage for flags
+from config import FAILURE_FLAGS_PATH, FAILURE_VOLTAGE_V, LIVE_DATA_MAX_AGE_S, LIVE_DATA_PATH, PHASES, TZ
+from db import init_db, insert_failure
 
-# Track previously detected failures to avoid duplicate entries
-
-
-def load_flags():
-    if os.path.exists(FLAG_FILE):
-        try:
-            with open(FLAG_FILE, "r") as f:
-                return json.load(f)
-        except Exception as e:
-            print(f"[Load Flag Error] {e}")
-    return {"R": False, "Y": False, "B": False}
+KEEP_PER_PHASE = 5
+CONFIRM_SAMPLES = 2
 
 
-def save_flags(flags):
+def load_flags() -> dict[str, bool]:
     try:
-        with open(FLAG_FILE, "w") as f:
-            json.dump(flags, f)
-    except Exception as e:
+        saved = json.loads(FAILURE_FLAGS_PATH.read_text())
+        return {p: bool(saved.get(p, False)) for p in PHASES}
+    except (OSError, ValueError):
+        return {p: False for p in PHASES}
+
+
+def save_flags(flags: dict[str, bool]) -> None:
+    try:
+        FAILURE_FLAGS_PATH.write_text(json.dumps(flags))
+    except OSError as e:
         print(f"[Save Flag Error] {e}")
 
 
-failure_logged = load_flags()
-
-
-def create_table():
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS power_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                phase TEXT NOT NULL,
-                failure_time TEXT NOT NULL
-            )
-        """)
-        conn.commit()
-
-
-def insert_failure(phase, timestamp):
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO power_events (phase, failure_time) VALUES (?, ?)
-        """,
-            (phase, timestamp),
-        )
-
-        # Keep only last 5 entries per phase
-        cursor.execute(
-            f"""
-            DELETE FROM power_events
-            WHERE id NOT IN (
-                SELECT id FROM power_events
-                WHERE phase = ?
-                ORDER BY failure_time DESC
-                LIMIT 1
-            ) AND phase = ?
-        """,
-            (phase, phase),
-        )
-
-        conn.commit()
-
-
-def read_live_data():
-    if not os.path.exists(JSON_PATH):
-        return {}, None
-
+def read_live_data() -> tuple[dict[str, float], str | None]:
+    """Latest voltages by phase, or ({}, None) if missing, unreadable or stale."""
     try:
-        with open(JSON_PATH, "r") as f:
-            data = json.load(f)
-        voltage = data.get("voltage", {})
-        timestamp = data.get(
-            "timestamp", datetime.now(IST).isoformat(timespec="seconds")
-        )
-        return voltage, timestamp
-    except Exception as e:
-        print(f"[Read JSON Error] {e}")
-        return {}, datetime.now(IST).isoformat(timespec="seconds")
+        data = json.loads(LIVE_DATA_PATH.read_text())
+    except (OSError, ValueError):
+        return {}, None
+    if time.time() - float(data.get("epoch", 0)) > LIVE_DATA_MAX_AGE_S:
+        return {}, None
+    return data.get("voltage", {}), data.get("timestamp") or datetime.now(TZ).isoformat(timespec="seconds")
 
 
-def monitor_voltage():
-    create_table()
+def monitor_voltage() -> None:
+    init_db()
+    failure_logged = load_flags()
+    low_count = {p: 0 for p in PHASES}
+    stale_warned = False
     print("[Voltage Monitor] Monitoring started...")
 
     while True:
         try:
             voltage, ts = read_live_data()
+            if ts is None:
+                if not stale_warned:
+                    print("[Voltage Monitor] No fresh data from the sampler; waiting")
+                    stale_warned = True
+                time.sleep(1)
+                continue
+            stale_warned = False
 
-            for phase in ["R", "Y", "B"]:
-                v = voltage.get(
-                    f"VoltageRMSReg_{phase}", 999
-                )  # fallback high to avoid false positives
-                if v < 10.0 and not failure_logged[phase]:
-                    print(
-                        f"[ALERT] Voltage LOW on phase {phase}: {v:.2f}V. Logging failure."
-                    )
-                    insert_failure(phase, ts)
+            for phase in PHASES:
+                v = voltage.get(phase)
+                if v is None:
+                    continue
+                # Require CONFIRM_SAMPLES consecutive low readings so one glitchy sample
+                # isn't logged as a power cut.
+                low_count[phase] = low_count[phase] + 1 if v < FAILURE_VOLTAGE_V else 0
+                if low_count[phase] >= CONFIRM_SAMPLES and not failure_logged[phase]:
+                    print(f"[ALERT] Voltage LOW on phase {phase}: {v:.2f}V. Logging failure.")
+                    insert_failure(phase, ts, keep=KEEP_PER_PHASE)
                     failure_logged[phase] = True
                     save_flags(failure_logged)
-
-                elif v >= 10.0 and failure_logged[phase]:
-                    # Reset flag if voltage has recovered
+                elif v >= FAILURE_VOLTAGE_V and failure_logged[phase]:
+                    print(f"[INFO] Phase {phase} supply restored ({v:.1f} V)")
                     failure_logged[phase] = False
                     save_flags(failure_logged)
 
@@ -126,4 +93,7 @@ def monitor_voltage():
 
 
 if __name__ == "__main__":
-    monitor_voltage()
+    try:
+        monitor_voltage()
+    except KeyboardInterrupt:
+        pass

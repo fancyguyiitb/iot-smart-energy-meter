@@ -7,13 +7,14 @@ import matplotlib.dates as mdates
 from zoneinfo import ZoneInfo
 import threading
 
-DB_NAME = "power_meter_data.db"
+from config import DB_PATH as DB_NAME  # one DB path shared by every process
 BTN_BG = "lightgray"
 BTN_ACTIVE = "#333333"
 BTN_SELECTED = "white"  # 555555"
 BTN_TEXT = "#FFFFFF"
 BG_COLOR = "#121212"
 IST = ZoneInfo("Asia/Kolkata")
+DECIMATE_S = 3  # plot one point per phase every 3 s
 
 
 class PowerPage(tk.Frame):
@@ -130,7 +131,7 @@ class PowerPage(tk.Frame):
             callback()
             loading_win.destroy()
 
-        threading.Thread(target=run_and_close).start()
+        self.after(50, run_and_close)  # Tk is not thread-safe: stay on the main thread
 
     def set_power_type(self, ptypes, label=None):
         self.power_types = ptypes
@@ -149,11 +150,14 @@ class PowerPage(tk.Frame):
     def on_show(self):
         print("[PowerPage] Active")
         self.update_loop_running = True
-        self.after(100, self.update_data)
+        self._job = self.after(100, self.update_data)
 
     def on_hide(self):
         print("[PowerPage] Hidden")
         self.update_loop_running = False
+        if getattr(self, "_job", None):
+            self.after_cancel(self._job)  # don't leave a refresh loop running while hidden
+            self._job = None
 
     def update_data(self):
         if not self.update_loop_running:
@@ -164,20 +168,24 @@ class PowerPage(tk.Frame):
         try:
             # Define IST timezone and compute today's 24-hour window in IST.
             ist = timezone(timedelta(hours=5, minutes=30))
-            day_start = datetime.combine(date.today(), datetime.min.time()).replace(
+            day_start = datetime.combine(datetime.now(IST).date(), datetime.min.time()).replace(
                 tzinfo=ist
             )
             day_end = day_start + timedelta(days=1)
+            if getattr(self, "_day", None) != day_start:
+                # New day: start a fresh plot instead of growing the lists forever.
+                self._day = day_start
+                self._last_kept = {}
+                for d in self.data.values():
+                    for series in d.values():
+                        series.clear()
 
-            # Prepare the optimized query:
-            #  - Fetch rows where id > last_logged_id.
-            #  - Only return every third row (id % 3 == 0).
-            #  - Return only rows from today's 24-hour period.
+            # Rows newer than last_logged_id, today only. Decimated by time below
+            # (the old `id % 3 = 0` filter depended on exactly 4 rows per sample).
             query = """
                 SELECT id, phase, apparent_power,active_power, reactive_power, timestamp
                 FROM power_data
                 WHERE id > ?
-                  AND (id % 3) = 0
                   AND timestamp >= ? AND timestamp < ?
                 ORDER BY id ASC
             """
@@ -196,11 +204,16 @@ class PowerPage(tk.Frame):
             # additional filtering is minimal.
             for row in rows:
                 row_id, phase, apparent, active, reactive, timestamp_str = row
+                self.last_logged_id = row_id
 
                 if phase not in self.data:
                     continue
 
                 dt = datetime.fromisoformat(timestamp_str)  # Keeps the +05:30 offset
+                last = self._last_kept.get(phase)
+                if last is not None and (dt - last).total_seconds() < DECIMATE_S:
+                    continue
+                self._last_kept[phase] = dt
 
                 # Append the row values directly since filtering is done in SQL.
                 self.data[phase]["timestamps"].append(dt)
@@ -230,11 +243,11 @@ class PowerPage(tk.Frame):
         except Exception as e:
             print(f"[PowerPage Error] {e}")
 
-        self.after(1000, self.update_data)
+        self._job = self.after(1000, self.update_data)
 
     def refresh_plot(self):
         ist = timezone(timedelta(hours=5, minutes=30))
-        day_start = datetime.combine(date.today(), datetime.min.time()).replace(
+        day_start = datetime.combine(datetime.now(IST).date(), datetime.min.time()).replace(
             tzinfo=ist
         )
 

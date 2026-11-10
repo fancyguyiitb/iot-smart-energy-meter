@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voltix</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚡</text></svg>">
+  <link rel="stylesheet" href="styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header id="topbar" hidden>
+    <div class="brand"><span class="logo">⚡</span> Voltix</div>
+    <nav>
+      <a href="#/dashboard" data-route="dashboard">Dashboard</a>
+      <a href="#/monitor" data-route="monitor">Monitor</a>
+      <a href="#/analysis" data-route="analysis">Analysis</a>
+      <a href="#/quality" data-route="quality">Power quality</a>
+      <a href="#/control" data-route="control">Control</a>
+    </nav>
+    <div class="who">
+      <span id="device-chip" class="chip">–</span>
+      <span id="username"></span>
+      <button id="logout" class="link">Log out</button>
+    </div>
+  </header>
+  <main id="view"></main>
+  <div id="toast" hidden></div>
+  <script src="app.js"></script>
+</body>
+</html>

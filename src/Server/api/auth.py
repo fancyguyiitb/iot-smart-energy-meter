@@ -1,151 +1,106 @@
+"""Accounts and device ownership.
+
+Sign-up = proving physical access to the meter: the QR code on its screen carries a
+short-lived, one-time token encrypted with *that device's* claim key.
+
+Fixes compared with the original version:
+* Passwords are hashed (PBKDF2), never stored or compared in plaintext.
+* Credentials travel in a JSON body, not in URL query strings (which end up in logs).
+* The claim token's timestamp is enforced (``CLAIM_TTL_SECONDS``) and each token works
+  once; previously a photo of the QR worked forever.
+* A meter that already has an owner can't be silently re-registered (account takeover).
+* A broken token returns 400 instead of an unhandled ``InvalidToken`` (500).
+* Users live in a relational table, so accounts don't expire after 30 days.
+"""
+
+from __future__ import annotations
+
+from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, HTTPException
-from influxdb_client import Point
-from datetime import datetime
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
-from fastapi.responses import JSONResponse
-from cryptography.fernet import Fernet
 
-from utils.database import write_api, query_api
-from utils.security import create_access_token
+from api.dependencies import get_current_user
+from api.services import hub
 from config import settings
-
-
-security = HTTPBasic()
+from utils.database import ClaimError, get_metadata_db
+from utils.models import ClaimRequest, LoginRequest, SignUpRequest
+from utils.security import create_access_token, hash_password, verify_password
 
 router = APIRouter()
+CLAIM_PREFIX = "VOLTIX1"
+_dummy_hash: str | None = None
 
-BUCKET = settings.influxdb_bucket
-ORG = settings.influxdb_org
+
+def verify_claim_code(code: str) -> tuple[str, str]:
+    """Return (device_id, nonce) for a valid, unexpired claim code, else raise 400."""
+    parts = code.strip().split(":", 2)
+    if len(parts) != 3 or parts[0] != CLAIM_PREFIX:
+        raise HTTPException(status_code=400, detail="Not a Voltix sign-up code")
+    _, device_id, token = parts
+    device = get_metadata_db().get_device(device_id)
+    if device is None:
+        raise HTTPException(status_code=400, detail="Unknown meter")
+    try:
+        payload = Fernet(device["claim_key"].encode()).decrypt(token.encode(), ttl=settings.claim_ttl_seconds)
+        token_device, nonce = payload.decode().split("::", 1)
+    except (InvalidToken, ValueError):
+        raise HTTPException(status_code=400, detail="Sign-up code is invalid or has expired. "
+                                                    "Show a fresh QR code on the meter.")
+    if token_device != device_id:
+        raise HTTPException(status_code=400, detail="Sign-up code does not match the meter")
+    return device_id, nonce
+
+
+@router.post("/sign-up", status_code=201)
+def sign_up(req: SignUpRequest):
+    device_id, nonce = verify_claim_code(req.claim_code)
+    password_hash = hash_password(req.password)
+    try:
+        user_id = get_metadata_db().claim(device_id, nonce, new_user=(req.username, password_hash))
+    except ClaimError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    return {
+        "message": "User created successfully",
+        "access_token": create_access_token(user_id, req.username),
+        "token_type": "bearer",
+        "device_id": device_id,
+    }
 
 
 @router.post("/login")
-async def login(credentials: HTTPBasicCredentials = Depends(security)):
-    """Login and authenticate user against InfluxDB using Basic Auth"""
-
-    query = f"""
-    from(bucket: "{BUCKET}")
-      |> range(start: -30d)
-      |> filter(fn: (r) => r._measurement == "user_auth")
-    """
-    tables = query_api.query(query, org=ORG)
-
-    latest_records = {}  # Store latest uname-password-device_id triplets
-
-    for table in tables:
-        for record in table.records:
-            device_id = record.values.get("device_id")
-            record_time = record.get_time()
-            field = record.values.get("_field")
-            value = record.values.get("_value")
-
-            if device_id not in latest_records:
-                latest_records[device_id] = {
-                    "uname": None,
-                    "password": None,
-                    "timestamp": None,
-                }
-
-            if (
-                latest_records[device_id]["timestamp"] is None
-                or record_time > latest_records[device_id]["timestamp"]
-            ):
-                latest_records[device_id]["timestamp"] = record_time
-
-            if field == "uname":
-                latest_records[device_id]["uname"] = value
-            elif field == "password":
-                latest_records[device_id]["password"] = value
-
-    matched_device_id = None
-    stored_password = None
-
-    for device_id, user_data in latest_records.items():
-        if user_data["uname"] == credentials.username:
-            matched_device_id = device_id
-            stored_password = user_data["password"]
-            break
-
-    if not matched_device_id or credentials.password != stored_password:
+def login(req: LoginRequest):
+    global _dummy_hash
+    user = get_metadata_db().get_user_by_username(req.username)
+    if user is None:
+        # Spend the same time as a real check so response timing doesn't reveal usernames.
+        _dummy_hash = _dummy_hash or hash_password("not-a-real-password")
+        verify_password(req.password, _dummy_hash)
         raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    access_token = create_access_token(
-        device_id=matched_device_id, username=credentials.username
-    )
-
-    return JSONResponse(
-        content={"access_token": access_token, "token_type": "bearer"}, status_code=200
-    )
+    if not verify_password(req.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"access_token": create_access_token(user["id"], user["username"]), "token_type": "bearer"}
 
 
-@router.post("/sign-up")
-async def sign_up(username: str, password: str, device_code: str):
-    """Initial sign-up of the phone application with the server.
-
-    - Retrieves all `device_keys` records.
-    - Verifies if `device_code` exists in any of the records.
-    - Stores `username` and `hashed password` in `user_auth`.
-    - Ensures only one user per `device_id`.
-    """
-
-    # Query all device_keys records
-    #
-    secret_key = settings.signup_sec_key.encode()
-    device_code = decrypt_device_time(secret_key=secret_key, token=device_code.encode())
-    query = f"""
-    from(bucket: "{BUCKET}")
-      |> range(start: -30d)
-      |> filter(fn: (r) => r._measurement == "device_keys")
-    """
-    tables = query_api.query(query, org=ORG)
-
-    device_id = None
-
-    # Check for matching device_code
-    for table in tables:
-        for record in table.records:
-            if record.get_value() == device_code:  # Checking device_code here
-                device_id = record.values.get("device_id")
-                break
-
-    if not device_id:
-        raise HTTPException(status_code=400, detail="Invalid device code")
-
-    hashed_password = password  # FIXME: Replace with actual hashing
-
-    # Delete existing user authentication data for this device
-    delete_query = f"""
-    from(bucket: "{BUCKET}")
-      |> range(start: -30d)
-      |> filter(fn: (r) => r._measurement == "user_auth")
-      |> filter(fn: (r) => r.device_id == "{device_id}")
-      |> drop(columns: ["_value"])
-    """
-    query_api.query(delete_query, org=ORG)
-
-    point = (
-        Point("user_auth")
-        .tag("device_id", device_id)
-        .field("uname", username)
-        .field("password", hashed_password)  # Store only the hashed password
-        .time(datetime.utcnow())
-    )
-    write_api.write(bucket=BUCKET, org=ORG, record=point)
-
-    # Generate authentication token
-    token = create_access_token(device_id=device_id, username=username)
-
-    return JSONResponse(
-        content={"message": "User created successfully", "access_token": token},
-        status_code=201,
-    )
+@router.get("/me")
+def me(user: dict = Depends(get_current_user)):
+    devices = get_metadata_db().devices_for_user(user["id"])
+    return {"id": user["id"], "username": user["username"],
+            "devices": [d | {"online": hub.is_online(d["device_id"])} for d in devices]}
 
 
-def decrypt_device_time(secret_key: bytes, token: bytes) -> str:
-    """
-    Decrypts the token using the secret_key to retrieve the original device_id and timestamp.
+@router.post("/claim-device", status_code=201)
+def claim_device(req: ClaimRequest, user: dict = Depends(get_current_user)):
+    """Add another meter to an existing account."""
+    device_id, nonce = verify_claim_code(req.claim_code)
+    try:
+        get_metadata_db().claim(device_id, nonce, user_id=user["id"])
+    except ClaimError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail)
+    return {"device_id": device_id}
 
-    """
-    cipher = Fernet(secret_key)
-    msg = cipher.decrypt(token).decode()
-    device_id, _ = msg.split("::")
-    return device_id
+
+@router.post("/release-device/{device_id}")
+def release_device(device_id: str, user: dict = Depends(get_current_user)):
+    """Give up ownership (e.g. before selling the house) so someone else can sign up."""
+    if not get_metadata_db().release_device(device_id, user["id"]):
+        raise HTTPException(status_code=404, detail="Device not found")
+    return {"released": device_id}
