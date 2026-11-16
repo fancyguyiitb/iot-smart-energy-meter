@@ -57,11 +57,14 @@ def device_key_matches(key: str, stored_hash: str) -> bool:
     return hmac.compare_digest(hash_device_key(key), stored_hash)
 
 
-def create_access_token(user_id: int, username: str) -> str:
+def create_access_token(user_id: int, username: str, version: int = 0) -> str:
+    """``ver`` is the user's token version: changing or resetting the password bumps it,
+    which invalidates every token issued before (log out everywhere)."""
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
         "uname": username,
+        "ver": version,
         "iat": now,
         "exp": now + timedelta(minutes=settings.access_token_expire_minutes),
         "typ": "access",
@@ -80,3 +83,36 @@ def verify_token(token: str) -> dict:
     if payload.get("typ") != "access":
         raise HTTPException(status_code=401, detail="Invalid token")
     return payload
+
+
+# --------------------------------------------------------------------------- password reset
+def new_reset_token() -> tuple[str, str]:
+    """(token for the email link, hash to store). Only the hash ever touches the database,
+    so a leaked DB can't be used to reset anyone's password."""
+    token = secrets.token_urlsafe(32)
+    return token, hashlib.sha256(token.encode()).hexdigest()
+
+
+def hash_reset_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+# --------------------------------------------------------------------------- password policy
+COMMON_PASSWORDS = {
+    "password", "password1", "password123", "12345678", "123456789", "1234567890", "qwerty123",
+    "qwertyuiop", "iloveyou", "11111111", "00000000", "abc12345", "letmein1", "welcome1",
+    "admin123", "passw0rd", "sunshine", "princess", "football", "baseball", "monkey123",
+    "dragon12", "india123", "voltix123", "changeme", "trustno1",
+}
+
+
+def password_problem(password: str, username: str = "") -> str | None:
+    """Why a password is unacceptable, or None. Length beats complexity rules (NIST
+    800-63B), so: at least 8 characters, not a well-known password, not the username."""
+    if len(password) < 8:
+        return "Password must be at least 8 characters"
+    if password.lower() in COMMON_PASSWORDS:
+        return "That password is too common; choose another"
+    if username and username.lower() in password.lower():
+        return "Password must not contain your username"
+    return None

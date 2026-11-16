@@ -44,8 +44,8 @@ def log(name: str, line: str) -> None:
         print(f"\033[{COLORS.get(name, '0')}m{name:>8} |\033[0m {line}", flush=True)
 
 
-def run_once(args: list[str], cwd: Path) -> str:
-    out = subprocess.run([PY, *args], cwd=cwd, capture_output=True, text=True)
+def run_once(args: list[str], cwd: Path, env: dict | None = None) -> str:
+    out = subprocess.run([PY, *args], cwd=cwd, capture_output=True, text=True, env=env)
     if out.returncode != 0:
         sys.exit(f"{' '.join(args)} failed:\n{out.stdout}\n{out.stderr}")
     return out.stdout.strip()
@@ -87,6 +87,9 @@ def main() -> None:
     parser.add_argument("--server-port", type=int, default=8000)
     parser.add_argument("--board-port", type=int, default=9000)
     parser.add_argument("--device-id", default="meter-001")
+    parser.add_argument("--sandbox", type=Path, metavar="DIR",
+                        help="isolated run: server DB, device identity and meter data all live in DIR "
+                             "(your normal data is untouched; good for tests and CI)")
     args = parser.parse_args()
 
     busy = [p for p in (args.server_port, args.board_port) if port_in_use(p)]
@@ -97,14 +100,23 @@ def main() -> None:
     server_url = f"http://127.0.0.1:{args.server_port}"
     board_url = f"http://127.0.0.1:{args.board_port}"
 
-    # One-time setup.
-    log("setup", run_once(["manage.py", "init-env"], SERVER))
-    log("setup", run_once(["manage.py", "provision-device", "--device-id", args.device_id, "--name", "Virtual meter",
-                           "--env-out", str(RPI / "device.env"), "--server-url", server_url], SERVER))
-
     env = os.environ | {"PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
-    fw_env = env | {"VOLTIX_HAL": "virtual", "SIM_URL": board_url, "SERVER_URL": server_url,
-                    "GUI_GEOMETRY": os.getenv("GUI_GEOMETRY", "1600x900")}
+    device_env_file = RPI / "device.env"
+    fw_extra: dict[str, str] = {}
+    if args.sandbox:
+        box = args.sandbox.resolve()
+        device_env_file = box / "device.env"
+        env |= {"DATA_DIR": str(box / "server")}  # server data
+        fw_extra = {"DATA_DIR": str(box / "device"), "VOLTIX_DEVICE_ENV": str(device_env_file)}
+        log("setup", f"Sandbox: {box}")
+
+    # One-time setup.
+    log("setup", run_once(["manage.py", "init-env"], SERVER, env))
+    log("setup", run_once(["manage.py", "provision-device", "--device-id", args.device_id, "--name", "Virtual meter",
+                           "--env-out", str(device_env_file), "--server-url", server_url], SERVER, env))
+
+    fw_env = env | fw_extra | {"VOLTIX_HAL": "virtual", "SIM_URL": board_url, "SERVER_URL": server_url,
+                               "GUI_GEOMETRY": os.getenv("GUI_GEOMETRY", "1600x900")}
 
     procs = [
         start("server", ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", str(args.server_port),
@@ -123,7 +135,7 @@ def main() -> None:
     if args.gui:
         procs.append(start("gui", ["app.py"], RPI, fw_env))
 
-    code, link = run_once(["claim.py"], RPI).splitlines()[-2:]
+    code, link = run_once(["claim.py"], RPI, fw_env).splitlines()[-2:]
     banner = [
         "",
         "Voltix is running with virtual hardware:",

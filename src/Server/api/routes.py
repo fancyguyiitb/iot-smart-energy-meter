@@ -24,11 +24,12 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import ValidationError
 
 from api.dependencies import get_current_device, get_current_user, resolve_user_device
+from api.live import merge_latest
 from api.services import hub
 from config import settings
 from storage import StorageError, get_store
 from utils.database import get_metadata_db
-from utils.models import READING_FIELDS, Reading
+from utils.models import READING_FIELDS, PowerEvent, Reading
 from utils.sprint import Logger
 
 l = Logger.get_instance(True)
@@ -74,6 +75,24 @@ def write_data(payload: list[dict] = Body(...), device: dict = Depends(get_curre
     return {"message": "Data written successfully.", "accepted": accepted, "rejected": rejected}
 
 
+@router.post("/write-events", status_code=201)
+def write_events(events: list[PowerEvent], device: dict = Depends(get_current_device)):
+    """Power-failure events from a device. Re-sending an event with its end time updates it."""
+    if len(events) > settings.max_batch_size:
+        raise HTTPException(status_code=413, detail="Batch too large")
+    accepted = _store_call(get_store().write_events, device["device_id"], events) if events else 0
+    return {"accepted": accepted}
+
+
+@router.get("/events")
+def get_events(days: int = Query(30, ge=1, le=400), device_id: str | None = None,
+               user: dict = Depends(get_current_user)):
+    """Supply interruptions per phase over the last ``days`` days, newest first."""
+    device_id = resolve_user_device(user, device_id)
+    end = datetime.now(timezone.utc) + timedelta(minutes=1)
+    return _store_call(get_store().events, device_id, end - timedelta(days=days), end)
+
+
 @router.get("/last-energy-data")
 def get_last_energy_val(device: dict = Depends(get_current_device)):
     """Latest cumulative energy per phase, used by the device to resume after a restart."""
@@ -90,7 +109,7 @@ def list_devices(user: dict = Depends(get_current_user)):
 def get_latest_values(device_id: str | None = None, user: dict = Depends(get_current_user)):
     """Newest reading per phase (R, Y, B, Neutral) with its age in seconds."""
     device_id = resolve_user_device(user, device_id)
-    latest = _store_call(get_store().latest, device_id)
+    latest = merge_latest(device_id, _store_call(get_store().latest, device_id))  # live lane wins if newer
     now = datetime.now(timezone.utc)
     for row in latest.values():
         row["age_s"] = round((now - datetime.fromisoformat(row["timestamp"])).total_seconds(), 1)

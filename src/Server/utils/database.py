@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS relay_audit (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_relay_audit_device ON relay_audit(device_id, id);
+-- Password reset: only a hash of the token is stored; single use; short expiry.
+CREATE TABLE IF NOT EXISTS reset_tokens (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -73,6 +80,12 @@ class MetadataDB:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(users)")}
+            if "email" not in cols:  # migrate databases from before password reset existed
+                conn.execute("ALTER TABLE users ADD COLUMN email TEXT")
+            if "token_version" not in cols:
+                conn.execute("ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email)")
 
     @contextmanager
     def connect(self):
@@ -89,8 +102,54 @@ class MetadataDB:
     # ------------------------------------------------------------------ users
     def get_user(self, user_id: int) -> dict | None:
         with self.connect() as c:
-            row = c.execute("SELECT id, username, created_at FROM users WHERE id = ?", (user_id,)).fetchone()
+            row = c.execute("SELECT id, username, email, token_version, created_at FROM users WHERE id = ?",
+                            (user_id,)).fetchone()
         return dict(row) if row else None
+
+    def get_user_by_email(self, email: str) -> dict | None:
+        with self.connect() as c:
+            row = c.execute("SELECT * FROM users WHERE email = ?", (email.strip().lower(),)).fetchone()
+        return dict(row) if row else None
+
+    def set_email(self, user_id: int, email: str | None) -> None:
+        """Raises ClaimError(409) if another account uses the address."""
+        try:
+            with self.connect() as c:
+                c.execute("UPDATE users SET email = ? WHERE id = ?", (email.strip().lower() if email else None, user_id))
+        except sqlite3.IntegrityError:
+            raise ClaimError(409, "That email address is already used by another account")
+
+    def set_password(self, user_id: int, password_hash: str) -> int:
+        """Change the password, invalidate every issued token and pending reset link.
+        Returns the new token version."""
+        with self.connect() as c:
+            c.execute("UPDATE users SET password_hash = ?, token_version = token_version + 1 WHERE id = ?",
+                      (password_hash, user_id))
+            c.execute("DELETE FROM reset_tokens WHERE user_id = ?", (user_id,))
+            return c.execute("SELECT token_version FROM users WHERE id = ?", (user_id,)).fetchone()[0]
+
+    def bump_token_version(self, user_id: int) -> int:
+        """Log out every session of a user."""
+        with self.connect() as c:
+            c.execute("UPDATE users SET token_version = token_version + 1 WHERE id = ?", (user_id,))
+            return c.execute("SELECT token_version FROM users WHERE id = ?", (user_id,)).fetchone()[0]
+
+    # ------------------------------------------------------------------ password reset
+    def create_reset_token(self, user_id: int, token_hash: str, expires_at: datetime) -> None:
+        """Only one live reset link per user: issuing a new one revokes older ones."""
+        with self.connect() as c:
+            c.execute("DELETE FROM reset_tokens WHERE user_id = ?", (user_id,))
+            c.execute("INSERT INTO reset_tokens (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)",
+                      (token_hash, user_id, expires_at.isoformat(), _now()))
+
+    def consume_reset_token(self, token_hash: str) -> int | None:
+        """Atomically use a reset token. Returns the user id, or None if unknown/expired/used."""
+        with self.connect() as c:
+            row = c.execute("DELETE FROM reset_tokens WHERE token_hash = ? RETURNING user_id, expires_at",
+                            (token_hash,)).fetchone()
+        if row is None or datetime.fromisoformat(row["expires_at"]) < datetime.now(timezone.utc):
+            return None
+        return row["user_id"]
 
     def get_user_by_username(self, username: str) -> dict | None:
         with self.connect() as c:
@@ -130,7 +189,7 @@ class MetadataDB:
 
     # ------------------------------------------------------------------ claiming
     def claim(self, device_id: str, nonce: str, *, user_id: int | None = None,
-              new_user: tuple[str, str] | None = None) -> int:
+              new_user: tuple | None = None) -> int:
         """Atomically: burn the one-time nonce, create the user (optional), bind the device.
 
         Returns the owner's user id. Raises ClaimError on any conflict; nothing is written then.
@@ -142,12 +201,14 @@ class MetadataDB:
             except sqlite3.IntegrityError:
                 raise ClaimError(400, "This sign-up code was already used. Show a new QR code on the meter.")
             if new_user is not None:
-                username, password_hash = new_user
+                username, password_hash, *rest = new_user
+                email = rest[0].strip().lower() if rest and rest[0] else None
                 try:
-                    cur = c.execute("INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-                                    (username, password_hash, _now()))
-                except sqlite3.IntegrityError:
-                    raise ClaimError(409, "Username already taken")
+                    cur = c.execute("INSERT INTO users (username, password_hash, email, created_at) VALUES (?, ?, ?, ?)",
+                                    (username, password_hash, email, _now()))
+                except sqlite3.IntegrityError as e:
+                    raise ClaimError(409, "That email address is already used" if "email" in str(e)
+                                     else "Username already taken")
                 user_id = cur.lastrowid
             cur = c.execute("UPDATE devices SET owner_id = ?, claimed_at = ? WHERE device_id = ? AND owner_id IS NULL",
                             (user_id, _now(), device_id))

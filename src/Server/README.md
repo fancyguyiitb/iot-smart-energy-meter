@@ -4,7 +4,7 @@ FastAPI backend. It authenticates users and meters, ingests readings, serves ana
 
 ![System Architecture](EDL.png)
 
-The architecture rationale is in [DOC.md](./DOC.md). Open bugs and planned features are in [docs/BUGFIXES.md](../../docs/BUGFIXES.md).
+The architecture rationale is in [DOC.md](./DOC.md). Known limitations and planned features are in [docs/BUGFIXES.md](../../docs/BUGFIXES.md).
 
 ---
 
@@ -45,9 +45,34 @@ uvicorn main:app --reload
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `60` | Login session length |
 | `CLAIM_TTL_SECONDS` | `600` | Validity of a meter's sign-up QR code |
 | `CORS_ORIGINS` | localhost:8000 | JSON list of allowed browser origins |
-| `TIMEZONE` | `Asia/Kolkata` | Defines "a day" for analytics |
+| `TIMEZONE` | `Asia/Kolkata` | Defines "a day" for analytics and rollups |
+| `RAW_RETENTION_DAYS`, `HOURLY_RETENTION_DAYS` | `30`, `400` | Keep 1 Hz data / hourly rollups this long; daily rollups are kept forever |
+| `MAINTENANCE_INTERVAL_SECONDS` | `60` | How often new data is rolled up |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `MAIL_FROM` | unset | Mail for password resets; unset = write to `DATA_DIR/outbox` |
+| `PUBLIC_APP_URL` | local `/app/` | Base of the reset link in emails |
+| `RESET_TOKEN_TTL_MINUTES` | `15` | Reset link lifetime |
+| `TRUST_PROXY_HEADERS` | `false` | Use `X-Forwarded-For` for rate limits (only behind a trusted proxy) |
 
 ---
+
+## Data lifecycle
+
+| Data | Where | Kept |
+|---|---|---|
+| Newest sample | memory (live lane) | until replaced, about a second |
+| 1 Hz readings | `readings` | `RAW_RETENTION_DAYS` (30) |
+| Hourly rollups (avg/min/max, consumption) | `readings_hourly` | `HOURLY_RETENTION_DAYS` (400) |
+| Daily rollups | `readings_daily` | forever |
+
+Writes mark the hours they touch as dirty; a background job re-rolls those hours (so late data after an outage is counted) and only then lets retention delete raw rows. Queries for hourly or daily buckets, and for ranges older than the raw window, read the rollups.
+
+## Auth safeguards
+
+* Login: 20 attempts per minute per address; 5 wrong passwords lock that username for 15 minutes, whether or not the account exists.
+* Sign-up: 10 per hour per address. Reset requests: 5 per hour per address, 3 emails per hour per account.
+* Passwords: at least 8 characters, not a common password, not containing the username.
+* Reset links: random 256-bit token, only its hash stored, 15-minute lifetime, single use; the newest link revokes older ones.
+* Password reset or change ends every other session (token version in the JWT).
 
 ## API
 
@@ -58,17 +83,26 @@ User routes need `Authorization: Bearer <token>` from `/auth/login` or `/auth/si
 | `POST /auth/sign-up` | public | `{username, password, claim_code}`: claim a meter with its one-time QR code and create the account |
 | `POST /auth/login` | public | `{username, password}` → access token |
 | `GET /auth/me` | user | Account and meters |
+| `POST /auth/forgot-password` | public | `{identifier}` (username or email): emails a single-use reset link. Same reply whether or not the account exists |
+| `POST /auth/reset-password` | public | `{token, new_password}`: sets the password and ends every session |
+| `POST /auth/change-password` | user | `{current_password, new_password}`: ends other sessions, returns a new token |
+| `POST /auth/email` | user | `{current_password, email}`: set the recovery email |
+| `POST /auth/logout-all` | user | End every session |
 | `POST /auth/claim-device`, `POST /auth/release-device/{id}` | user | Add or give up a meter |
 | `POST /api/write-data` | device | Batch of readings (UTC ISO timestamps). Invalid rows are reported in `rejected`, not stored |
+| `POST /api/write-events` | device | Power-failure events; re-sending with an end time closes the event |
+| `POST /api/live` | device | Newest sample, every second (best effort, not stored) |
 | `GET /api/last-energy-data` | device | Latest cumulative energy per phase (resume after restart) |
 | `GET /api/devices` | user | Meters with online status and relay state |
 | `GET /api/latest-values` | user | Newest reading per phase, with its age |
+| `GET /api/events?days=30` | user | Supply interruptions per phase, with duration |
 | `GET /api/series?fields=…&date_str=…&every=…` | user | Averaged time series for a day |
 | `GET /api/query-data`, `GET /api/thd-values` | user | Preset series (power/V/I/energy; THD/PF/frequency) |
 | `GET /analytics/power`, `/analytics/energy`, `/analytics/energy-daily` | user | Power stats, consumption by hour, consumption by day |
 | `POST /remote-control` | user | `{phase: R/Y/B/ALL, command: on/off}`. Waits for the meter's confirmation |
 | `GET /remote-control/status`, `/remote-control/history` | user | Relay state, audit log |
 | `WS /ws` | device | Relay commands and acknowledgements |
+| `WS /ws/live` | user | Live samples pushed to the browser. First message: `{"token": "..."}` |
 | `GET /api/health` | public | Storage reachability |
 
 Interactive reference: http://127.0.0.1:8000/docs

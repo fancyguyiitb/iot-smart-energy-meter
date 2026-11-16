@@ -10,6 +10,7 @@ probes the security fixes. Exit code 0 = all checks passed.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
 import subprocess
@@ -22,8 +23,8 @@ import requests
 import websockets
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER = "http://127.0.0.1:8000"
-BOARD = "http://127.0.0.1:9000"
+SERVER = os.getenv("E2E_SERVER", "http://127.0.0.1:8000")
+BOARD = os.getenv("E2E_BOARD", "http://127.0.0.1:9000")
 failures = 0
 
 
@@ -49,7 +50,7 @@ def main() -> None:
 
     async def ws_bad_key() -> bool:
         try:
-            async with websockets.connect(f"ws://127.0.0.1:8000/ws",
+            async with websockets.connect(SERVER.replace("http", "ws", 1) + "/ws",
                                           additional_headers={"X-Device-Id": "meter-001", "X-Device-Key": "wrong"}):
                 return False
         except Exception:
@@ -94,7 +95,22 @@ def run_authenticated(s: requests.Session, auth: dict, user: str, pw: str) -> No
     # ---- data path
     latest = s.get(f"{SERVER}/api/latest-values", headers=auth).json()
     check("latest values for R/Y/B/Neutral", all(p in latest for p in ("R", "Y", "B", "Neutral")), str(list(latest)))
-    check("data is fresh (< 15 s)", latest.get("R", {}).get("age_s", 999) < 15, str(latest.get("R", {}).get("age_s")))
+    check("live lane: cloud data is under 3 s old (no 10 s batch delay)", latest.get("R", {}).get("age_s", 999) < 3,
+          f"{latest.get('R', {}).get('age_s')} s")
+
+    async def live_ws() -> tuple[bool, str]:
+        async with websockets.connect(SERVER.replace("http", "ws", 1) + "/ws/live") as ws:
+            await ws.send(json.dumps({"token": auth["Authorization"].split()[1]}))
+            hello = json.loads(await asyncio.wait_for(ws.recv(), 5))
+            stamps = set()
+            while len(stamps) < 3:  # three distinct samples pushed, about a second apart
+                msg = json.loads(await asyncio.wait_for(ws.recv(), 5))
+                stamps.add(msg["phases"]["R"]["timestamp"])
+            return hello["type"] == "hello", f"{len(stamps)} pushed samples"
+    ok, detail = asyncio.run(live_ws())
+    check("browser WebSocket receives live samples", ok, detail)
+    days = s.get(f"{SERVER}/analytics/energy-daily", headers=auth).json()
+    check("daily consumption served from rollups", days["month_total_kwh"] >= 0, f"{days['month_total_kwh']:.4f} kWh this month")
     truth = s.get(f"{BOARD}/api/state").json()["phases"]
     for p in ("R", "Y", "B"):
         tv, mv = truth[p]["voltage"], latest[p]["voltage_rms"]

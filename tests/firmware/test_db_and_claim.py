@@ -69,10 +69,14 @@ def test_energy_reset_request_is_seen_once():
     assert db.pending_energy_reset() is None
 
 
-def test_failure_log_keeps_last_five_per_phase():
+def test_failure_log_keeps_last_five_synced_per_phase():
     for i in range(8):
         db.insert_failure("R", f"2025-04-01T10:00:0{i}+05:30")
     db.insert_failure("Y", "2025-04-01T11:00:00+05:30")
+    ev = db.get_unsynced_events()
+    ids = [e.pop("id") for e in ev]
+    db.mark_events_synced(ids, ev)  # once uploaded, older ones may be pruned
+    db.insert_failure("R", "2025-04-01T10:00:09+05:30")
     rows = db.get_failures()
     assert sum(1 for p, _ in rows if p == "R") == 5
     assert sum(1 for p, _ in rows if p == "Y") == 1

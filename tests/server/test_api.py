@@ -43,17 +43,17 @@ def test_passwords_are_hashed(client, user_token):  # C7
 
 def test_claim_codes_expire_and_are_single_use(client, user_token):  # C6
     # The meter is already owned by alice -> a new valid code can't take it over.
-    r = client.post("/auth/sign-up", json={"username": "mallory", "password": "password123", "claim_code": claim_code("n2")})
+    r = client.post("/auth/sign-up", json={"username": "mallory", "password": "m4-secret-pass", "claim_code": claim_code("n2")})
     assert r.status_code == 409
     # Replaying alice's code fails (nonce burnt) - checked before ownership.
-    r = client.post("/auth/sign-up", json={"username": "mallory", "password": "password123", "claim_code": claim_code("n-alice")})
+    r = client.post("/auth/sign-up", json={"username": "mallory", "password": "m4-secret-pass", "claim_code": claim_code("n-alice")})
     assert r.status_code == 400
     # Expired code.
-    r = client.post("/auth/sign-up", json={"username": "mallory", "password": "password123",
+    r = client.post("/auth/sign-up", json={"username": "mallory", "password": "m4-secret-pass",
                                             "claim_code": claim_code("n3", age_s=3600)})
     assert r.status_code == 400 and "expired" in r.json()["detail"]
     # Garbage is a 400, not a 500.
-    r = client.post("/auth/sign-up", json={"username": "mallory", "password": "password123",
+    r = client.post("/auth/sign-up", json={"username": "mallory", "password": "m4-secret-pass",
                                             "claim_code": f"VOLTIX1:{DEVICE_ID}:not-a-token"})
     assert r.status_code == 400
 
@@ -113,6 +113,19 @@ def test_energy_consumption_survives_counter_reset(client, auth):  # M1 / H6
 def test_last_energy_for_device(client):
     r = client.get("/api/last-energy-data", headers=DEVICE_HEADERS)
     assert r.status_code == 200 and "R" in r.json()
+
+
+def test_power_events_upsert_and_read(client, auth):  # B6
+    start = now() - timedelta(minutes=10)
+    ev = {"phase": "Y", "start": start.isoformat(), "end": None}
+    assert client.post("/api/write-events", json=[ev]).status_code == 401  # device auth required
+    assert client.post("/api/write-events", json=[ev], headers=DEVICE_HEADERS).status_code == 201
+    got = client.get("/api/events?days=1", headers=auth).json()
+    assert got[0]["phase"] == "Y" and got[0]["end"] is None
+    ev["end"] = (start + timedelta(seconds=90)).isoformat()  # supply restored: same event, with an end
+    client.post("/api/write-events", json=[ev], headers=DEVICE_HEADERS)
+    got = client.get("/api/events?days=1", headers=auth).json()
+    assert len(got) == 1 and got[0]["duration_s"] == 90.0
 
 
 # ------------------------------------------------------------------ relay control

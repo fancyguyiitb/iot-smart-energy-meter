@@ -11,6 +11,7 @@ const state = {
   device: null,
   timers: [],
   charts: [],
+  sockets: [],
   globalTimer: null,
 };
 
@@ -68,7 +69,46 @@ function destroyCharts() {
 function cleanup() {
   state.timers.forEach(clearInterval);
   state.timers = [];
+  state.sockets.forEach((ws) => { ws.onclose = null; ws.close(); });
+  state.sockets = [];
   destroyCharts();
+}
+
+/** Live readings pushed over a WebSocket; falls back to polling while it's down. */
+function liveFeed(onSample, pollMs = 5000) {
+  let pollTimer = null;
+  let retry = 1000;
+  const poll = async () => {
+    try { onSample(await api(`/api/latest-values?${dev()}`), "polling"); } catch (e) { onSample(null, e.message); }
+  };
+  const startPolling = () => { if (!pollTimer) { poll(); pollTimer = setInterval(poll, pollMs); state.timers.push(pollTimer); } };
+  const stopPolling = () => { clearInterval(pollTimer); pollTimer = null; };
+  const connect = () => {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const base = API ? API.replace(/^http/, "ws") : `${proto}://${location.host}`;
+    const ws = new WebSocket(`${base}/ws/live`);
+    state.sockets.push(ws);
+    // The token goes in the first message, never in the URL (URLs end up in access logs).
+    ws.onopen = () => ws.send(JSON.stringify({ token: state.token, device_id: state.device && state.device.device_id }));
+    ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "hello") { stopPolling(); retry = 1000; }
+      if (msg.type === "sample") {
+        const now = Date.now();
+        for (const r of Object.values(msg.phases)) r.age_s = Math.max((now - new Date(r.timestamp)) / 1000, 0);
+        onSample(msg.phases, "live");
+      }
+    };
+    ws.onclose = (ev) => {
+      state.sockets = state.sockets.filter((x) => x !== ws);
+      startPolling();
+      if (ev.code === 4401) return; // auth problem: polling will surface it (and log out on 401)
+      setTimeout(connect, retry);
+      retry = Math.min(retry * 2, 30000);
+    };
+  };
+  startPolling();
+  connect();
 }
 
 // ---------------------------------------------------------------- charts
@@ -162,6 +202,7 @@ function login(view) {
       <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
       <p class="error" id="err"></p>
       <button class="primary">Log in</button>
+      <p class="muted"><a href="#/forgot">Forgot your password?</a></p>
       <p class="muted">New meter? <a href="#/signup">Create an account with its sign-up code</a></p>
     </form>`);
   $("#f").addEventListener("submit", async (e) => {
@@ -187,6 +228,7 @@ function signup(view, params) {
       <p class="muted">Open <b>Get QR</b> on the meter's screen and scan it, or run
         <code>python src/RPi/claim.py</code> on the device. Codes expire after 10 minutes and work once.</p>
       <label>Username <input name="username" autocomplete="username" minlength="3" required></label>
+      <label>Email (optional, needed to reset a forgotten password) <input name="email" type="email" autocomplete="email"></label>
       <label>Password (8+ characters) <input name="password" type="password" autocomplete="new-password" minlength="8" required></label>
       <p class="error" id="err"></p>
       <button class="primary">Create account</button>
@@ -198,7 +240,8 @@ function signup(view, params) {
     try {
       const r = await api("/auth/sign-up", {
         method: "POST", auth: false,
-        body: { username: fd.get("username"), password: fd.get("password"), claim_code: fd.get("claim_code").trim() },
+        body: { username: fd.get("username"), password: fd.get("password"), claim_code: fd.get("claim_code").trim(),
+          email: fd.get("email") || null },
       });
       state.token = r.access_token;
       safeSet("voltix_token", r.access_token);
@@ -232,7 +275,7 @@ function dashboard(view) {
       <div class="card tile"><div class="k">Total active power</div><div class="v" id="t-p">–</div></div>
       <div class="card tile"><div class="k">Energy today</div><div class="v" id="t-e">–</div></div>
       <div class="card tile"><div class="k">Neutral current</div><div class="v" id="t-n">–</div></div>
-      <div class="card tile"><div class="k">Last reading</div><div class="v" id="t-age">–</div></div>
+      <div class="card tile"><div class="k">Last reading <span id="t-mode" class="chip">…</span></div><div class="v" id="t-age">–</div></div>
     </div>
     <div class="grid cols-4" id="phases" style="margin-bottom:14px"></div>
     <div class="card"><h2>Active power, this session</h2><div class="chart-box"><canvas id="live"></canvas></div></div>`;
@@ -267,10 +310,11 @@ function dashboard(view) {
     { label: "Total", data: [], borderColor: css("--ink"), backgroundColor: css("--ink"), borderDash: [4, 3] }], { yTitle: "W" });
   let lastTs = null;
 
-  every(2000, async () => {
-    let data;
-    try { data = await api(`/api/latest-values?${dev()}`); } catch (e) { $("#t-age").textContent = e.message; return; }
+  liveFeed((data, mode) => {
+    if (!data) { $("#t-age").textContent = mode; return; }
     if (!data.R) { $("#t-age").textContent = "no data yet"; return; }
+    $("#t-mode").textContent = mode === "live" ? "● live" : "polling";
+    $("#t-mode").className = `chip ${mode === "live" ? "ok" : "warn"}`;
     let total = 0;
     for (const p of PHASES) {
       const r = data[p] || {};
@@ -436,8 +480,23 @@ function quality(view) {
     <h1>Power quality</h1>
     <div class="row"><label>Day <input type="date" id="day" value="${todayStr()}"></label>
       <span class="muted">1-minute averages. Sags, swells and outages show up in the voltage plot.</span></div>
+    <div class="card" style="margin-bottom:14px"><h2>Supply interruptions (last 30 days)</h2>
+      <table><thead><tr><th>Phase</th><th>Lost supply</th><th>Restored</th><th>Duration</th></tr></thead>
+      <tbody id="outages"><tr><td colspan="4" class="muted">Loading…</td></tr></tbody></table></div>
     <div class="grid cols-2">${charts.map(([f, t]) =>
       `<div class="card"><h2>${t}</h2><div class="chart-box"><canvas id="q-${f}"></canvas></div></div>`).join("")}</div>`;
+  const when = (iso) => new Date(iso).toLocaleString("en-GB", { timeZone: TZ, dateStyle: "medium", timeStyle: "medium" });
+  const dur = (s) => (s == null ? "ongoing" : s < 60 ? `${num(s, 0)} s` : s < 3600 ? `${num(s / 60, 1)} min` : `${num(s / 3600, 1)} h`);
+  const loadOutages = async () => {
+    try {
+      const ev = await api(`/api/events?days=30&${dev()}`);
+      $("#outages").innerHTML = ev.map((e) => `<tr><td>${esc(e.phase)}</td><td>${esc(when(e.start))}</td>
+        <td>${e.end ? esc(when(e.end)) : "–"}</td><td>${dur(e.duration_s)}</td></tr>`).join("")
+        || '<tr><td colspan="4" class="muted">No interruptions recorded</td></tr>';
+    } catch (e) { $("#outages").innerHTML = `<tr><td colspan="4" class="muted">${esc(e.message)}</td></tr>`; }
+  };
+  loadOutages();
+  state.timers.push(setInterval(loadOutages, 15000));
   const load = async () => {
     destroyCharts();
     try {
@@ -517,8 +576,98 @@ function control(view) {
   state.timers.push(setInterval(() => api(`/remote-control/status?refresh=false&${dev()}`).then(show).catch(() => {}), 5000));
 }
 
+// ---------------------------------------------------------------- password reset / account
+function forgot(view) {
+  authPage(view, "Reset your password", `
+    <form id="f">
+      <label>Username or email <input name="identifier" autocomplete="username" required></label>
+      <p class="error" id="err"></p><p class="muted" id="ok"></p>
+      <button class="primary">Send reset link</button>
+      <p class="muted">Links expire after 15 minutes and work once. <a href="#/login">Back to log in</a></p>
+    </form>`);
+  $("#f").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    $("#err").textContent = "";
+    try {
+      const r = await api("/auth/forgot-password", { method: "POST", auth: false, body: { identifier: new FormData(e.target).get("identifier") } });
+      $("#ok").textContent = r.message;
+    } catch (err) { $("#err").textContent = err.message; }
+  });
+}
+
+function reset(view, params) {
+  authPage(view, "Choose a new password", `
+    <form id="f">
+      <label>New password (8+ characters) <input name="p1" type="password" autocomplete="new-password" minlength="8" required></label>
+      <label>Repeat it <input name="p2" type="password" autocomplete="new-password" minlength="8" required></label>
+      <p class="error" id="err"></p>
+      <button class="primary">Set password</button>
+      <p class="muted">Every device signed in to this account will be logged out.</p>
+    </form>`);
+  $("#f").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    if (fd.get("p1") !== fd.get("p2")) { $("#err").textContent = "The passwords don't match"; return; }
+    try {
+      const r = await api("/auth/reset-password", { method: "POST", auth: false, body: { token: params.get("token") || "", new_password: fd.get("p1") } });
+      state.token = null; safeSet("voltix_token", null); state.user = null;
+      toast(r.message);
+      location.hash = "#/login";
+    } catch (err) { $("#err").textContent = err.message; }
+  });
+}
+
+function account(view) {
+  view.innerHTML = `
+    <h1>Account</h1>
+    <div class="grid cols-2">
+      <div class="card"><h2>Change password</h2>
+        <form id="pw" class="auth-form" style="display:grid;gap:10px">
+          <label>Current password <input name="current" type="password" autocomplete="current-password" required></label>
+          <label>New password <input name="new" type="password" autocomplete="new-password" minlength="8" required></label>
+          <p class="error" id="pw-err"></p>
+          <button class="primary">Change password</button>
+          <p class="muted">Other devices signed in to this account will be logged out.</p>
+        </form></div>
+      <div class="card"><h2>Recovery email</h2>
+        <form id="em" style="display:grid;gap:10px">
+          <label>Email <input name="email" type="email" autocomplete="email" value="${esc(state.user.email || "")}"></label>
+          <label>Current password <input name="current" type="password" autocomplete="current-password" required></label>
+          <p class="error" id="em-err"></p>
+          <button>Save email</button>
+          <p class="muted">Used only to send password-reset links.</p>
+        </form></div>
+      <div class="card"><h2>Sessions</h2>
+        <p class="muted">Lost a phone or used a shared computer? End every session, including this one.</p>
+        <button id="all" class="danger">Log out everywhere</button></div>
+    </div>`;
+  $("#pw").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      const r = await api("/auth/change-password", { method: "POST", body: { current_password: fd.get("current"), new_password: fd.get("new") } });
+      state.token = r.access_token; safeSet("voltix_token", r.access_token);
+      e.target.reset(); $("#pw-err").textContent = ""; toast("Password changed; other devices were logged out");
+    } catch (err) { $("#pw-err").textContent = err.message; }
+  });
+  $("#em").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+      const r = await api("/auth/email", { method: "POST", body: { current_password: fd.get("current"), email: fd.get("email") || null } });
+      state.user.email = r.email; $("#em-err").textContent = ""; e.target.current.value = ""; toast("Email saved");
+    } catch (err) { $("#em-err").textContent = err.message; }
+  });
+  $("#all").addEventListener("click", async () => {
+    if (!confirm("Log out of every device, including this one?")) return;
+    try { await api("/auth/logout-all", { method: "POST" }); } catch { /* logging out anyway */ }
+    logout("Logged out everywhere");
+  });
+}
+
 // ---------------------------------------------------------------- router
-const routes = { login, signup, dashboard, monitor, analysis, quality, control };
+const routes = { login, signup, forgot, reset, dashboard, monitor, analysis, quality, control, account };
+const PUBLIC = new Set(["login", "signup", "forgot", "reset"]);
 
 async function render() {
   cleanup();
@@ -528,14 +677,14 @@ async function render() {
   const params = new URLSearchParams(qs || "");
   const view = $("#view");
 
-  if (!state.token && route !== "login" && route !== "signup") { location.hash = "#/login"; return; }
-  if (state.token && (route === "login" || route === "signup") && !params.get("code")) { location.hash = "#/dashboard"; return; }
+  if (!state.token && !PUBLIC.has(route)) { location.hash = "#/login"; return; }
+  if (state.token && (route === "login" || route === "signup" || route === "forgot") && !params.get("code")) { location.hash = "#/dashboard"; return; }
   if (state.token && !state.user) {
     try { await loadMe(); } catch (e) { if (e.status !== 401) view.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
   }
   $("#topbar").hidden = !state.token;
   document.querySelectorAll("nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === route));
-  if (state.token && !state.device && routes[route] && route !== "login" && route !== "signup") { noDevice(view); return; }
+  if (state.token && !state.device && routes[route] && !PUBLIC.has(route) && route !== "account") { noDevice(view); return; }
   (routes[route] || dashboard)(view, params);
 }
 

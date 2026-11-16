@@ -18,7 +18,7 @@ import time
 from datetime import datetime
 
 from config import FAILURE_FLAGS_PATH, FAILURE_VOLTAGE_V, LIVE_DATA_MAX_AGE_S, LIVE_DATA_PATH, PHASES, TZ
-from db import init_db, insert_failure
+from db import init_db, insert_failure, mark_restored
 
 KEEP_PER_PHASE = 5
 CONFIRM_SAMPLES = 2
@@ -82,6 +82,7 @@ def monitor_voltage() -> None:
                     save_flags(failure_logged)
                 elif v >= FAILURE_VOLTAGE_V and failure_logged[phase]:
                     print(f"[INFO] Phase {phase} supply restored ({v:.1f} V)")
+                    mark_restored(phase, ts)
                     failure_logged[phase] = False
                     save_flags(failure_logged)
 

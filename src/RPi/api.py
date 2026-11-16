@@ -21,10 +21,20 @@ from datetime import datetime
 
 from ADE9000API import ADE9000
 from ADE9000RegMap import ADDR_RUN
-from config import LIVE_DATA_PATH, PHASE_TO_CHIP, PHASES, SAMPLE_INTERVAL_S
+from clock import wait_for_trusted_clock
+from config import (
+    CLOCK_SYNC_TIMEOUT_S,
+    ENERGY_RESTORE_RETRY_S,
+    ENERGY_STATE_PATH,
+    LIVE_DATA_PATH,
+    PHASE_TO_CHIP,
+    PHASES,
+    SAMPLE_INTERVAL_S,
+)
 from db import (
     ack_energy_reset,
     get_last_energy,
+    get_latest_timestamp,
     init_db,
     insert_samples,
     now_local_iso,
@@ -41,6 +51,7 @@ PRUNE_EVERY_S = 3600
 MAX_DT_S = 10 * SAMPLE_INTERVAL_S  # longest gap we integrate over after a stall
 LOG_EVERY_N = 10
 DSP_SETTLE_S = 1.0
+STATE_EVERY_N = 10
 
 l = Logger.get_instance(debug=True)
 ade9000 = ADE9000()
@@ -74,15 +85,56 @@ def _parse(ts: str | None) -> datetime | None:
         return None
 
 
-def restore_energy() -> dict[str, float]:
-    """Per phase, continue from whichever of local DB / server has the newer reading."""
+def save_energy_state(energy: dict[str, float], timestamp: str) -> None:
+    """Small side file so the counter survives a lost or corrupt database."""
+    atomic_write_text(ENERGY_STATE_PATH, json.dumps({"timestamp": timestamp, "energy_kwh": energy}))
+
+
+def load_energy_state() -> dict | None:
+    try:
+        data = json.loads(ENERGY_STATE_PATH.read_text())
+        return {"timestamp": data["timestamp"], "energy_kwh": {p: float(data["energy_kwh"][p]) for p in PHASES}}
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def newest(candidates: list[tuple[str | None, float]]) -> float | None:
+    """Value of the candidate with the newest timestamp, or None if none has one."""
+    dated = [(_parse(ts), v) for ts, v in candidates if _parse(ts) is not None]
+    return max(dated, key=lambda c: c[0])[1] if dated else None
+
+
+def restore_energy(retry_s: float = ENERGY_RESTORE_RETRY_S, sleep=time.sleep) -> dict[str, float]:
+    """Continue the energy counters from the newest of: local DB, state file, server.
+
+    If the local DB and the state file are both empty (new SD card, corrupt DB) and the
+    server can't be reached, keep asking the server for ``retry_s`` before starting from
+    0. Previously an unreachable server at boot silently reset the counter.
+    """
+    state = load_energy_state()
+    local = {p: get_last_energy(p) for p in PHASES}
+    have_local = state is not None or any(ts for _, ts in local.values())
+
     remote = get_remote_last_energy()
+    waited, delay = 0.0, 2.0
+    while remote is None and not have_local and waited < retry_s:
+        l.eprint(f"[WARN] No local energy history and the server is unreachable; retrying in {delay:.0f} s")
+        sleep(delay)
+        waited += delay
+        delay = min(delay * 2, 30.0)
+        remote = get_remote_last_energy()
+    if remote is None and not have_local:
+        l.eprint("[WARN] Starting energy counters from 0: no local history and no server")
+
     restored = {}
     for p in PHASES:
-        local_kwh, local_ts = get_last_energy(p)
-        candidates = [(_parse(local_ts), local_kwh), (_parse(remote[p]["timestamp"]), remote[p]["energy_kwh"])]
-        candidates = [c for c in candidates if c[0] is not None]
-        restored[p] = max(candidates, key=lambda c: c[0])[1] if candidates else 0.0
+        candidates = [(local[p][1], local[p][0])]
+        if state:
+            candidates.append((state["timestamp"], state["energy_kwh"][p]))
+        if remote:
+            candidates.append((remote[p]["timestamp"], remote[p]["energy_kwh"]))
+        value = newest(candidates)
+        restored[p] = value if value is not None else 0.0
     l.iprint("[INFO] Restored energy (kWh):", {p: round(v, 4) for p, v in restored.items()})
     return restored
 
@@ -122,6 +174,7 @@ def monitor_data(interval: float = SAMPLE_INTERVAL_S) -> None:
                 dt = MAX_DT_S
 
             token = pending_energy_reset()
+            was_reset = bool(token)
             if token:
                 energy = {p: 0.0 for p in PHASES}
                 ack_energy_reset(token)
@@ -156,6 +209,8 @@ def monitor_data(interval: float = SAMPLE_INTERVAL_S) -> None:
 
             insert_samples(rows, deltas, day=timestamp[:10])
             write_live_data({r["phase"]: r["voltage_rms"] for r in rows[:3]}, timestamp)
+            if was_reset or n % STATE_EVERY_N == 0:  # every 10 s: limits SD-card writes
+                save_energy_state(energy, timestamp)
 
             if n % LOG_EVERY_N == 0:
                 l.iprint("Sample", timestamp, " | ".join(
@@ -182,6 +237,8 @@ if __name__ == "__main__":
             l.eprint(f"[INIT] ADE9000 not reachable ({e}); retrying in 3 s")
             time.sleep(3)
     try:
+        # Readings stamped with a wrong clock land on the wrong day forever; wait first.
+        wait_for_trusted_clock(get_latest_timestamp, CLOCK_SYNC_TIMEOUT_S, log=l.iprint)
         monitor_data(interval=SAMPLE_INTERVAL_S)
     except KeyboardInterrupt:
         pass

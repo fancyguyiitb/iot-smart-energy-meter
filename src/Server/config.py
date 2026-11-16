@@ -42,6 +42,25 @@ class Settings(BaseSettings):
     device_online_timeout_seconds: float = 90.0
     max_batch_size: int = 2000
 
+    # Rollups and retention (SQLite backend; for InfluxDB see deploy/influx_downsampling.flux)
+    raw_retention_days: float = 30  # 1 Hz readings; older raw data is deleted once rolled up
+    hourly_retention_days: float = 400  # hourly rollups; daily rollups are kept forever
+    maintenance_interval_seconds: float = 60  # how often dirty hours are re-rolled
+
+    # Live lane: newest reading pushed by the device every second (not persisted here;
+    # the batched sync remains the durable path)
+    live_min_interval_seconds: float = 0.5  # drop pushes faster than this per device
+
+    # Auth hardening
+    trust_proxy_headers: bool = False  # only behind a reverse proxy that sets X-Forwarded-For
+    reset_token_ttl_minutes: int = 15
+    public_app_url: str = "http://127.0.0.1:8000/app/"  # used in password-reset emails
+    smtp_host: str | None = None  # unset = write emails to data_dir/outbox (local dev)
+    smtp_port: int = 587
+    smtp_user: str | None = None
+    smtp_password: str | None = None
+    mail_from: str = "Voltix <no-reply@voltix.local>"
+
     cors_origins: list[str] = ["http://localhost:8000", "http://127.0.0.1:8000"]
     timezone: str = "Asia/Kolkata"
     webapp_dir: Path = REPO_ROOT / "src" / "WebApp"

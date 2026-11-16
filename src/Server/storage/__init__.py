@@ -19,7 +19,8 @@ def get_store() -> TimeSeriesStore:
         else:
             from storage.sqlite_store import SQLiteStore
 
-            _store = SQLiteStore(settings.timeseries_db)
+            _store = SQLiteStore(settings.timeseries_db, settings.timezone, settings.raw_retention_days,
+                                 settings.hourly_retention_days)
     return _store
 
 

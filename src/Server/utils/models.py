@@ -54,10 +54,46 @@ class Reading(BaseModel):
         return v.astimezone(timezone.utc)
 
 
+class PowerEvent(BaseModel):
+    """A supply interruption on one phase. ``end`` is None while the outage is ongoing."""
+
+    phase: Literal["R", "Y", "B"]
+    start: AwareDatetime
+    end: AwareDatetime | None = None
+
+    @field_validator("start", "end")
+    @classmethod
+    def _utc(cls, v: datetime | None) -> datetime | None:
+        return v.astimezone(timezone.utc) if v else v
+
+
+EMAIL_PATTERN = r"^[^@\s]{1,64}@[^@\s]+\.[^@\s]{2,}$"
+
+
 class SignUpRequest(BaseModel):
     username: str = Field(..., min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
     password: str = Field(..., min_length=8, max_length=128)
     claim_code: str = Field(..., max_length=1024)
+    email: str | None = Field(None, max_length=254, pattern=EMAIL_PATTERN)  # needed for password reset
+
+
+class ForgotPasswordRequest(BaseModel):
+    identifier: str = Field(..., min_length=1, max_length=254, description="Username or email")
+
+
+class ResetPasswordRequest(BaseModel):
+    token: str = Field(..., min_length=20, max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., max_length=128)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class EmailUpdateRequest(BaseModel):
+    current_password: str = Field(..., max_length=128)
+    email: str | None = Field(None, max_length=254, pattern=EMAIL_PATTERN)
 
 
 class LoginRequest(BaseModel):

@@ -1,24 +1,46 @@
-from contextlib import asynccontextmanager
+import asyncio
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from analytics.routes import analysis_router
 from api.auth import router as auth_router
+from api.live import live_router
 from api.routes import router as api_router
 from api.websockets import ws_router
 from config import settings
 from storage import close_store, get_store
 from utils.database import get_metadata_db
+from utils.sprint import Logger
+
+l = Logger.get_instance(True)
+
+
+async def maintenance_loop() -> None:
+    """Keep rollups current and apply retention, in the background."""
+    while True:
+        try:
+            result = await run_in_threadpool(get_store().run_maintenance)
+            if result.get("raw_deleted") or result.get("hourly_deleted"):
+                l.iprint(f"Retention: {result}")
+        except Exception as e:  # never let maintenance take the server down
+            l.eprint(f"Maintenance failed: {type(e).__name__}: {e}")
+        await asyncio.sleep(settings.maintenance_interval_seconds)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     get_metadata_db()  # create tables
     get_store()
+    task = asyncio.create_task(maintenance_loop())
     yield
+    task.cancel()
+    with suppress(asyncio.CancelledError):
+        await task
     close_store()
 
 
@@ -37,6 +59,7 @@ app.add_middleware(
 app.include_router(api_router, prefix="/api")
 app.include_router(auth_router, prefix="/auth")
 app.include_router(ws_router, prefix="")
+app.include_router(live_router)
 app.include_router(analysis_router, prefix="/analytics")
 
 # The web client (src/WebApp) is static and same-origin locally; in the cloud it can be

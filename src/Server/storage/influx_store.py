@@ -21,7 +21,7 @@ from influxdb_client import InfluxDBClient, Point, WritePrecision
 from influxdb_client.client.write_api import SYNCHRONOUS
 
 from storage.base import ENERGY_PHASES, StorageError, TimeSeriesStore
-from utils.models import READING_FIELDS, Reading
+from utils.models import READING_FIELDS, PowerEvent, Reading
 
 MEASUREMENT = "power_data"
 
@@ -139,6 +139,37 @@ class InfluxStore(TimeSeriesStore):
                     out.setdefault(rec.values["phase"], []).append(
                         {"start": rec.get_time().isoformat(), "kwh": rec.get_value() or 0.0})
         return out
+
+    def write_events(self, device_id: str, events: list[PowerEvent]) -> int:
+        # Point identity (measurement, tags, start time) makes a re-send with an end time an update.
+        points = [
+            Point("power_events").tag("device_id", device_id).tag("phase", e.phase)
+            .field("end_ts", e.end.timestamp() if e.end else -1.0).time(e.start, WritePrecision.MS)
+            for e in events
+        ]
+        try:
+            self.write_api.write(bucket=self.bucket, org=self.org, record=points)
+        except Exception as e:
+            raise StorageError(str(e)) from e
+        return len(points)
+
+    def events(self, device_id, start, end):
+        flux = '''
+            from(bucket: params.bucket)
+              |> range(start: time(v: params.start), stop: time(v: params.stop))
+              |> filter(fn: (r) => r._measurement == "power_events" and r.device_id == params.device_id)
+              |> filter(fn: (r) => r._field == "end_ts")
+        '''
+        out = []
+        for table in self._query(flux, device_id=device_id, start=_flux_time(start), stop=_flux_time(end)):
+            for rec in table.records:
+                s = rec.get_time()
+                e = rec.get_value()
+                end_dt = datetime.fromtimestamp(e, tz=s.tzinfo) if e and e > 0 else None
+                out.append({"phase": rec.values.get("phase"), "start": s.isoformat(),
+                            "end": end_dt.isoformat() if end_dt else None,
+                            "duration_s": round((end_dt - s).total_seconds(), 1) if end_dt else None})
+        return sorted(out, key=lambda x: x["start"], reverse=True)
 
     def ping(self) -> None:
         if not self.client.ping():

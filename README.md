@@ -28,6 +28,9 @@ On first start the launcher prints a one-time sign-up link that registers the me
 ```bash
 python scripts/run_tests.py       # unit + regression tests (firmware and server)
 python scripts/e2e_check.py       # end-to-end checks against the running stack
+
+# isolated run that never touches your normal data (what tests/CI use):
+python scripts/run_local.py --sandbox .sandbox --server-port 8100 --board-port 9100
 ```
 
 ### How it fits together
@@ -53,7 +56,7 @@ On the real Pi, set `VOLTIX_HAL=hardware` in `src/RPi/device.env` and the same f
 | `src/Application/` | Flutter project scaffold (the Dart `lib/` was lost to a `.gitignore` rule, now fixed) |
 | `scripts/` | `run_local.py`, `run_tests.py`, `e2e_check.py` |
 | `tests/` | Firmware and server regression tests |
-| `docs/BUGFIXES.md` | Open bugs, known limitations, and the feature backlog |
+| `docs/BUGFIXES.md` | Known limitations and the feature backlog |
 | `deploy/` | InfluxDB compose file for trying the cloud storage backend |
 | `pcb/`, `3d_models/`, `reports/`, `others/`, `bom.xls` | Hardware design files and project reports |
 

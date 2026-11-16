@@ -11,7 +11,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from utils.models import READING_FIELDS, Reading
+from utils.models import READING_FIELDS, PowerEvent, Reading
 
 ENERGY_PHASES = ("R", "Y", "B")
 
@@ -50,10 +50,24 @@ class TimeSeriesStore(ABC):
         are aligned to local time via ``tz_offset_s`` (e.g. IST midnight).
         """
 
+    @abstractmethod
+    def write_events(self, device_id: str, events: list[PowerEvent]) -> int:
+        """Upsert power-failure events keyed by (device, phase, start)."""
+
+    @abstractmethod
+    def events(self, device_id: str, start: datetime, end: datetime) -> list[dict]:
+        """Events that started in [start, end), newest first:
+        [{"phase", "start", "end", "duration_s"}] (end/duration None while ongoing)."""
+
     def last_energy(self, device_id: str) -> dict[str, dict]:
         latest = self.latest(device_id)
         return {p: {"timestamp": v["timestamp"], "energy_kwh": v.get("energy_kwh")}
                 for p, v in latest.items() if p in ENERGY_PHASES}
+
+    def run_maintenance(self) -> dict:
+        """Roll up recent data and apply retention. Called periodically by the server.
+        Backends with native downsampling/retention (InfluxDB) do nothing here."""
+        return {}
 
     def ping(self) -> None:
         """Raise if the store is unreachable."""

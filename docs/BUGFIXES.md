@@ -1,37 +1,24 @@
-# Open bugs and feature backlog
+# Feature backlog
 
-Everything from the code review that has been fixed is removed from this list. Each changed module's docstring describes what it fixed, and `tests/` guards the fixes. What remains: open bugs, known limitations, and a menu of features to choose from.
+Every bug from the code review has been fixed or deliberately dropped. Each changed module's docstring describes what it fixed, and `tests/` guards the fixes. What remains: known limitations and a menu of features to choose from.
 
 Effort: **S** ≈ 1 day, **M** ≈ 2–4 days, **L** ≈ 1–2 weeks.
 
 ---
 
-## Open bugs
-
-| ID | Bug | Impact | Suggested fix | Effort |
-|---|---|---|---|---|
-| B1 | `ADE9000.spi_burst_read_resampled_wfb` calls `spi_transfer16`, which doesn't exist | Waveform capture crashes if called (unused today) | One `xfer2` per burst with chip-select held throughout; emulate the waveform buffer in the virtual chip | S |
-| B2 | A new owner of a resold meter sees the previous owner's readings and relay history, including usernames | Privacy leak between households | Scope user queries to data after the owner's `claimed_at` | S |
-| B3 | If the Pi boots with an empty local DB and the server is unreachable, the energy counter restarts at 0 | Displayed cumulative kWh drops (consumption analytics are unaffected: they sum positive steps) | Retry the remote restore before accepting a 0 baseline; persist the counter in a small separate file | S |
-| B4 | The Pi has no real-time clock. Before NTP syncs at boot, readings get a wrong but plausible timestamp, and the server accepts anything up to 400 days old | Data filed under the wrong day | Wait for NTP sync (`timedatectl`) before sampling | S |
-| B5 | Rows the server rejects are marked synced and dropped; only the server logs them | Rare, silent loss of malformed rows | Keep rejected rows in a local dead-letter table; show the count on the device | S |
-| B6 | Power-failure events stay on the Pi | The app can't show outages | Sync `power_events` like readings; add an events endpoint and app view | S |
-| B7 | The touchscreen GUI places widgets at fixed pixel positions for a 2000×1010 screen | Layout breaks on other screen sizes | Grid/pack layout with relative sizing | M |
-| B8 | The web app loads Chart.js from a CDN | No charts on an offline LAN | Vendor `chart.js` into `src/WebApp` | S |
-
 ## Known limitations and tech debt
 
 | Area | Limitation | Plan |
 |---|---|---|
-| Storage | The InfluxDB backend is written but has never been run (Docker wasn't available) | Run `scripts/e2e_check.py` against `deploy/docker-compose.yml` before the cloud move |
-| Latency | The cloud sees readings one sync batch (10 s) later | Feature 2 (live lane) or feature 14 (MQTT) |
-| Scale | Device WebSocket connections live in one server process | Shared broker (Redis pub/sub or MQTT) before running more than one worker |
-| Retention | The server keeps 1 Hz data forever; month queries scan raw rows | Hourly and daily rollups plus a retention policy |
-| Auth | No rate limiting on login or sign-up; the web app keeps its token in `localStorage`; no refresh tokens or password reset | Rate limiter; short-lived token plus refresh token; reset flow |
+| Storage | The InfluxDB backend is written but has never been run (Docker wasn't available). Its rollups and retention are InfluxDB tasks and bucket settings (`deploy/influx_downsampling.flux`), also untested | Run `scripts/e2e_check.py` against `deploy/docker-compose.yml` before the cloud move |
+| Scale | Relay connections, live-lane subscribers and rate-limit counters live in one server process | Shared broker and store (Redis or MQTT) before running more than one worker |
+| Auth | The web app keeps its token in `localStorage`; no refresh tokens; password reset needs an email on the account | Short-lived token plus an httpOnly refresh cookie; a meter-based recovery for accounts without email |
+| Email | Without `SMTP_HOST` set, reset emails are written to `DATA_DIR/outbox` instead of being sent | Configure SMTP (or a mail API) in the cloud |
+| Rollups | Hour/day buckets use the configured timezone; a timezone with daylight saving would need care around the switch | Fine for IST; revisit before supporting DST regions |
 | Transport | Device keys travel in request headers, which is safe only over HTTPS | Enforce HTTPS/WSS in the cloud; mTLS device certificates (feature 13) |
 | Operations | No systemd units on the Pi, so a crashed process stays down; logs only go to stdout | Unit files with `Restart=always` and a watchdog; rotated log files |
 | Client | The Flutter source was lost; the web app is the reference client | Rewrite against the current API (`src/Application/README.md`) |
-| Tests | No automated tests for sync backoff, relay reconnects or the InfluxDB backend | Cover them in hardware-in-the-loop CI (feature 11) |
+| Tests | No automated tests for sync backoff, relay reconnects or the InfluxDB backend | Cover them in hardware-in-the-loop CI (feature 11); `run_local.py --sandbox` already gives CI an isolated stack |
 
 **Outside the code:** the old QR encryption key (`QRCodePage.py`) and the Railway deployment URLs are in git history. Rotate any secrets of that deployment if it still exists.
 
@@ -42,12 +29,12 @@ Effort: **S** ≈ 1 day, **M** ≈ 2–4 days, **L** ≈ 1–2 weeks.
 | # | Feature | Area | Effort | Do first |
 |---|---|---|---|---|
 | 1 | Billing-grade energy from the chip's own accumulators | Metering | M | – |
-| 2 | Sync that loses nothing, plus a live lane | Reliability | M | – |
+| 2 | Sync sequence numbers and high-water acks, plus a chaos test (the live lane is done) | Reliability | S | – |
 | 3 | Power-quality event engine | Metering | M | – |
 | 4 | Fail-safe switching with closed-loop verification | Control | M | – |
 | 5 | 3-phase load-balancing advisor and bill forecast | Product | L | 1, 6 |
 | 6 | Appliance detection from power signatures | Product / ML | L | – |
-| 7 | Waveform capture and harmonic spectrum | Metering / DSP | L | B1 |
+| 7 | Waveform capture and harmonic spectrum | Metering / DSP | L | – |
 | 8 | Max-demand monitoring and automatic load shedding | Control | M | 4 |
 | 9 | Schedules and automation rules | Control | M | 4 |
 | 10 | Consumption anomaly detection | ML | M | – |
@@ -78,7 +65,7 @@ Effort: **S** ≈ 1 day, **M** ≈ 2–4 days, **L** ≈ 1–2 weeks.
 
 **7. Waveform capture and harmonic spectrum**
 - Capture the ADE9000 waveform buffer around an event or on demand, run an FFT on the Pi, and show harmonics 1–25 per phase next to the raw waveform.
-- Needs B1 fixed and waveform-buffer emulation in the virtual chip, built from each appliance's harmonic profile.
+- Needs the driver's burst read fixed (it calls a method that doesn't exist) and waveform-buffer emulation in the virtual chip, built from each appliance's harmonic profile.
 
 **17. Tamper detection**
 - Log the events a utility meter logs: reversed CT, missing neutral (measured neutral current ≠ phasor sum), bypass (phase currents and neutral disagree), chip power cycles, and an enclosure-open switch on a GPIO.

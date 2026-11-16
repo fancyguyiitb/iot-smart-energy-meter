@@ -16,6 +16,7 @@ Fixes compared with the original version:
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Iterable
@@ -53,6 +54,15 @@ CREATE TABLE IF NOT EXISTS power_events (
     failure_time TEXT NOT NULL
 );
 
+-- Rows the server refused (malformed). Kept for inspection instead of being dropped.
+CREATE TABLE IF NOT EXISTS rejected_data (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER,
+    payload TEXT NOT NULL,
+    error TEXT,
+    rejected_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS daily_energy (
     day TEXT NOT NULL,
     phase TEXT NOT NULL,
@@ -82,6 +92,12 @@ def connect() -> sqlite3.Connection:
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        # Migrate databases created before outage syncing existed.
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(power_events)")}
+        if "restored_time" not in cols:
+            conn.execute("ALTER TABLE power_events ADD COLUMN restored_time TEXT")
+        if "sync" not in cols:
+            conn.execute("ALTER TABLE power_events ADD COLUMN sync BOOLEAN DEFAULT 0")
 
 
 def now_local_iso() -> str:
@@ -156,25 +172,43 @@ def get_unsynced_data(limit: int = 500) -> list[dict]:
     finally:
         conn.close()
 
-    formatted = []
-    for row in rows:
-        r = dict(zip(("id",) + COLUMNS, row))
-        formatted.append({
-            "id": r["id"],
-            "phase": r["phase"],
-            "voltage_rms": r["voltage_rms"] or 0.0,
-            "current_rms": r["current_rms"] or 0.0,
-            "power_watt": r["active_power"] or 0.0,
-            "power_var": r["reactive_power"] or 0.0,
-            "power_va": r["apparent_power"] or 0.0,
-            "energy_kwh": r["energy_kwh"] or 0.0,
-            "voltage_thd": r["voltage_thd"] or 0.0,
-            "current_thd": r["current_thd"] or 0.0,
-            "power_factor": r["power_factor"] or 0.0,
-            "voltage_freq": r["voltage_freq"] or 0.0,
-            "time": to_utc_iso(r["timestamp"]),
-        })
-    return formatted
+    return [_format_row(row) for row in rows]
+
+
+def _format_row(row) -> dict:
+    """(id, *COLUMNS) -> the server's reading format, with a UTC timestamp."""
+    r = dict(zip(("id",) + COLUMNS, row))
+    return {
+        "id": r["id"],
+        "phase": r["phase"],
+        "voltage_rms": r["voltage_rms"] or 0.0,
+        "current_rms": r["current_rms"] or 0.0,
+        "power_watt": r["active_power"] or 0.0,
+        "power_var": r["reactive_power"] or 0.0,
+        "power_va": r["apparent_power"] or 0.0,
+        "energy_kwh": r["energy_kwh"] or 0.0,
+        "voltage_thd": r["voltage_thd"] or 0.0,
+        "current_thd": r["current_thd"] or 0.0,
+        "power_factor": r["power_factor"] or 0.0,
+        "voltage_freq": r["voltage_freq"] or 0.0,
+        "time": to_utc_iso(r["timestamp"]),
+    }
+
+
+def get_latest_sample() -> tuple[int, list[dict]] | None:
+    """The newest sample (all rows sharing the newest timestamp) for the live lane,
+    as (newest row id, rows). Read regardless of sync status."""
+    conn = connect()
+    try:
+        newest = conn.execute("SELECT id, timestamp FROM power_data ORDER BY id DESC LIMIT 1").fetchone()
+        if not newest:
+            return None
+        rows = conn.execute(
+            f"SELECT id, {', '.join(COLUMNS)} FROM power_data WHERE id > ? - 8 AND timestamp = ? ORDER BY id",
+            (newest[0], newest[1])).fetchall()
+    finally:
+        conn.close()
+    return newest[0], [_format_row(r) for r in rows]
 
 
 def count_unsynced() -> int:
@@ -280,15 +314,30 @@ def ack_energy_reset(token: str) -> None:
 
 # --------------------------------------------------------------------------- power events
 def insert_failure(phase: str, timestamp: str, keep: int = 5) -> None:
+    """Record the start of an outage. Keeps the last ``keep`` per phase on the device,
+    but never deletes an event that hasn't reached the server yet."""
     conn = connect()
     try:
         with conn:
-            conn.execute("INSERT INTO power_events (phase, failure_time) VALUES (?, ?)", (phase, timestamp))
+            conn.execute("INSERT INTO power_events (phase, failure_time, sync) VALUES (?, ?, 0)", (phase, timestamp))
             conn.execute(
-                """DELETE FROM power_events WHERE phase = ? AND id NOT IN (
+                """DELETE FROM power_events WHERE phase = ? AND sync = 1 AND id NOT IN (
                        SELECT id FROM power_events WHERE phase = ? ORDER BY failure_time DESC LIMIT ?)""",
                 (phase, phase, keep),
             )
+    finally:
+        conn.close()
+
+
+def mark_restored(phase: str, timestamp: str) -> None:
+    """Close the phase's open outage; it is re-sent to the server with its end time."""
+    conn = connect()
+    try:
+        with conn:
+            conn.execute(
+                """UPDATE power_events SET restored_time = ?, sync = 0 WHERE id = (
+                       SELECT id FROM power_events WHERE phase = ? AND restored_time IS NULL
+                       ORDER BY failure_time DESC LIMIT 1)""", (timestamp, phase))
     finally:
         conn.close()
 
@@ -297,5 +346,65 @@ def get_failures() -> list[tuple[str, str]]:
     conn = connect()
     try:
         return conn.execute("SELECT phase, failure_time FROM power_events ORDER BY failure_time DESC").fetchall()
+    finally:
+        conn.close()
+
+
+def get_unsynced_events(limit: int = 100) -> list[dict]:
+    conn = connect()
+    try:
+        rows = conn.execute("SELECT id, phase, failure_time, restored_time FROM power_events WHERE sync = 0 "
+                            "ORDER BY id LIMIT ?", (limit,)).fetchall()
+    finally:
+        conn.close()
+    return [{"id": i, "phase": p, "start": to_utc_iso(f), "end": to_utc_iso(r) if r else None}
+            for i, p, f, r in rows]
+
+
+def mark_events_synced(ids: list[int], sent: list[dict]) -> None:
+    """Mark sent events synced - unless they changed meanwhile (restored while in flight)."""
+    conn = connect()
+    try:
+        with conn:
+            for event_id, ev in zip(ids, sent):
+                restored = conn.execute("SELECT restored_time FROM power_events WHERE id = ?",
+                                        (event_id,)).fetchone()
+                if restored and bool(restored[0]) == bool(ev["end"]):
+                    conn.execute("UPDATE power_events SET sync = 1 WHERE id = ?", (event_id,))
+    finally:
+        conn.close()
+
+
+def get_latest_timestamp() -> datetime | None:
+    """Newest reading time stored locally (for the clock sanity check)."""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT timestamp FROM power_data ORDER BY id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    try:
+        return datetime.fromisoformat(row[0]) if row and row[0] else None
+    except ValueError:
+        return None
+
+
+# --------------------------------------------------------------------------- rejected rows
+def store_rejected(rows: list[dict], errors: dict[int, str]) -> None:
+    """Dead-letter: keep rows the server refused (by their index in ``rows``)."""
+    conn = connect()
+    try:
+        with conn:
+            conn.executemany(
+                "INSERT INTO rejected_data (source_id, payload, error, rejected_at) VALUES (?, ?, ?, ?)",
+                [(rows[i].get("id"), json.dumps(rows[i]), err, now_local_iso()) for i, err in errors.items()],
+            )
+    finally:
+        conn.close()
+
+
+def count_rejected() -> int:
+    conn = connect()
+    try:
+        return conn.execute("SELECT COUNT(*) FROM rejected_data").fetchone()[0]
     finally:
         conn.close()

@@ -181,3 +181,6 @@ src/RPi/data/
 src/Server/data/
 *.db-wal
 *.db-shm
+
+# Isolated runs (run_local.py --sandbox .sandbox)
+.sandbox/

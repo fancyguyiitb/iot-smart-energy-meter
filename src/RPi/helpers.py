@@ -7,20 +7,20 @@ import requests
 from config import HTTP_TIMEOUT_S, PHASES, SERVER_URL, device_headers
 
 
-def get_last_energy() -> dict[str, dict]:
+def get_last_energy() -> dict[str, dict] | None:
     """Latest cumulative energy the *server* holds for this device, per phase.
 
-    Always returns ``{"R": {"energy_kwh": float, "timestamp": str | None}, ...}``.
-    The old version returned two different shapes (a float on success, a dict on
-    failure), so the success path crashed the sampler; it also used a different host
-    than sync.py and had no timeout.
+    Returns ``{"R": {"energy_kwh": float, "timestamp": str | None}, ...}``, or ``None``
+    if the server couldn't be asked (offline, error). "No data yet" is a valid answer
+    (zeros with no timestamp); "couldn't ask" is not, so callers can retry instead of
+    silently restarting the energy counter at 0.
     """
-    empty = {p: {"energy_kwh": 0.0, "timestamp": None} for p in PHASES}
     try:
         response = requests.get(f"{SERVER_URL}/api/last-energy-data", headers=device_headers(),
                                 timeout=HTTP_TIMEOUT_S)
         if response.status_code != 200:
-            return empty
+            print(f"[ERROR]: Server returned HTTP {response.status_code} for last energy")
+            return None
         data = response.json()
         return {
             p: {"energy_kwh": float((data.get(p) or {}).get("energy_kwh") or 0.0),
@@ -29,7 +29,7 @@ def get_last_energy() -> dict[str, dict]:
         }
     except (requests.RequestException, ValueError) as e:
         print(f"[ERROR]: Error fetching last energy from server: {e}")
-        return empty
+        return None
 
 
 # Old name, kept so external scripts keep working.

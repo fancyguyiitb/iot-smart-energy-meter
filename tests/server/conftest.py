@@ -56,3 +56,34 @@ def user_token(client):
 @pytest.fixture()
 def auth(user_token):
     return {"Authorization": f"Bearer {user_token}"}
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rate_limits():
+    from utils.ratelimit import limiter
+
+    limiter.clear()
+    yield
+    limiter.clear()
+
+
+@pytest.fixture()
+def new_user(client):
+    """A user with their own freshly provisioned meter (for tests that end sessions)."""
+    import secrets as _s
+
+    from utils.database import get_metadata_db
+    from utils.security import hash_device_key
+
+    def make(email: str | None = None, password: str = "first-pass-123"):
+        device_id = f"m-{_s.token_hex(3)}"
+        key = Fernet.generate_key().decode()
+        get_metadata_db().upsert_device(device_id, hash_device_key("k"), key)
+        name = f"u{_s.token_hex(3)}"
+        r = client.post("/auth/sign-up", json={"username": name, "password": password, "email": email,
+                                               "claim_code": claim_code(_s.token_hex(4), key=key, device_id=device_id)})
+        assert r.status_code == 201, r.text
+        return {"username": name, "password": password, "device_id": device_id,
+                "headers": {"Authorization": f"Bearer {r.json()['access_token']}"}}
+
+    return make

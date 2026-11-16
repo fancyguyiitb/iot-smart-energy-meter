@@ -27,6 +27,9 @@ def get_current_user(creds: HTTPAuthorizationCredentials | None = Depends(bearer
     user = get_metadata_db().get_user(int(payload["sub"]))
     if user is None:
         raise HTTPException(status_code=401, detail="User no longer exists")
+    if payload.get("ver", 0) != user["token_version"]:
+        # Password changed / reset or "log out everywhere" since this token was issued.
+        raise HTTPException(status_code=401, detail="Session ended; please log in again")
     return user
 
 

@@ -49,6 +49,12 @@ DB_PATH = str(Path(os.getenv("DB_PATH", DATA_DIR / "power_meter_data.db")))
 LIVE_DATA_PATH = DATA_DIR / "live_data.json"
 RELAY_STATE_PATH = DATA_DIR / "relay_state.json"
 FAILURE_FLAGS_PATH = DATA_DIR / "failure_flags.json"
+ENERGY_STATE_PATH = DATA_DIR / "energy_state.json"  # survives a lost/corrupt DB
+
+CLOCK_SYNC_TIMEOUT_S = float(os.getenv("CLOCK_SYNC_TIMEOUT_S", "300"))
+# If neither the local DB nor the state file has an energy reading, keep asking the server
+# this long before starting the counter from 0.
+ENERGY_RESTORE_RETRY_S = float(os.getenv("ENERGY_RESTORE_RETRY_S", "120"))
 
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Kolkata"))
 
@@ -59,6 +65,10 @@ SAMPLE_INTERVAL_S = float(os.getenv("SAMPLE_INTERVAL_S", "1.0"))
 SYNC_INTERVAL_S = float(os.getenv("SYNC_INTERVAL_S", "10"))
 SYNC_BATCH_SIZE = int(os.getenv("SYNC_BATCH_SIZE", "500"))
 RETENTION_DAYS = float(os.getenv("RETENTION_DAYS", "3"))  # synced rows older than this are pruned
+# Live lane: push the newest sample every LIVE_INTERVAL_S (best effort, beside the durable sync)
+LIVE_ENABLED = _bool("LIVE_ENABLED", "true")
+LIVE_INTERVAL_S = float(os.getenv("LIVE_INTERVAL_S", "1"))
+LIVE_MAX_AGE_S = float(os.getenv("LIVE_MAX_AGE_S", "10"))  # don't push stale samples (sampler stopped)
 
 # Relays: one GPIO per phase (BCM numbering). HIGH closes the relay unless ACTIVE_HIGH=false.
 RELAY_PINS = {
