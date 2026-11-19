@@ -3,7 +3,6 @@
 import re
 from datetime import datetime, timedelta, timezone
 
-from conftest import claim_code
 
 
 def _outbox_link(to: str) -> str:

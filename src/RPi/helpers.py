@@ -23,7 +23,7 @@ def get_last_energy() -> dict[str, dict] | None:
             return None
         data = response.json()
         return {
-            p: {"energy_kwh": float((data.get(p) or {}).get("energy_kwh") or 0.0),
+            p: {**{c: float((data.get(p) or {}).get(c) or 0.0) for c in ("energy_kwh", "energy_sw_kwh", "export_kwh")},
                 "timestamp": (data.get(p) or {}).get("timestamp")}
             for p in PHASES
         }

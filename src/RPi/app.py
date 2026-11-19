@@ -133,7 +133,7 @@ class App(tk.Tk):
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
 
-                for name, obj in inspect.getmembers(module, inspect.isclass):
+                for _name, obj in inspect.getmembers(module, inspect.isclass):
                     if issubclass(obj, tk.Frame) and obj.__module__ == module_name:
                         pages.append(obj)
         order = {name: i for i, name in enumerate(PAGE_ORDER)}

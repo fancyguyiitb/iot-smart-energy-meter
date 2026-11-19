@@ -12,6 +12,7 @@ const state = {
   timers: [],
   charts: [],
   sockets: [],
+  viewGen: 0, // bumped on every navigation
   globalTimer: null,
 };
 
@@ -36,12 +37,24 @@ function toast(msg, ms = 3500) {
   toast._t = setTimeout(() => { t.hidden = true; }, ms);
 }
 
+// A response that arrives after the user has navigated away must not touch the new page
+// (it would write into elements that no longer exist). Such responses never resolve.
+const STALE = () => new Promise(() => {});
+
 async function api(path, { method = "GET", body, auth = true } = {}) {
+  const gen = state.viewGen;
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (auth && state.token) headers.Authorization = `Bearer ${state.token}`;
-  const res = await fetch(API + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  let res;
+  try {
+    res = await fetch(API + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch (e) {
+    if (gen !== state.viewGen) return STALE();
+    throw new Error("Can't reach the server. Check your connection.");
+  }
   const data = await res.json().catch(() => ({}));
+  if (gen !== state.viewGen) return STALE();
   if (res.status === 401 && auth) {
     logout("Your session has expired. Please log in again.");
     throw Object.assign(new Error("Session expired"), { status: 401 });
@@ -69,7 +82,7 @@ function destroyCharts() {
 function cleanup() {
   state.timers.forEach(clearInterval);
   state.timers = [];
-  state.sockets.forEach((ws) => { ws.onclose = null; ws.close(); });
+  state.sockets.forEach((ws) => { ws.onclose = null; ws.onmessage = null; ws.close(); });
   state.sockets = [];
   destroyCharts();
 }
@@ -273,7 +286,8 @@ function dashboard(view) {
     <h1>Live readings</h1>
     <div class="tiles">
       <div class="card tile"><div class="k">Total active power</div><div class="v" id="t-p">–</div></div>
-      <div class="card tile"><div class="k">Energy today</div><div class="v" id="t-e">–</div></div>
+      <div class="card tile"><div class="k">Energy today (chip)</div><div class="v" id="t-e">–</div></div>
+      <div class="card tile"><div class="k">Software vs chip, today</div><div class="v" id="t-diff">–</div></div>
       <div class="card tile"><div class="k">Neutral current</div><div class="v" id="t-n">–</div></div>
       <div class="card tile"><div class="k">Last reading <span id="t-mode" class="chip">…</span></div><div class="v" id="t-age">–</div></div>
     </div>
@@ -292,7 +306,9 @@ function dashboard(view) {
         <div><span class="k">Frequency</span><span class="v" data-f="voltage_freq"></span></div>
         <div><span class="k">Reactive</span><span class="v" data-f="power_var"></span></div>
         <div><span class="k">Apparent</span><span class="v" data-f="power_va"></span></div>
-        <div><span class="k">Energy (counter)</span><span class="v" data-f="energy_kwh"></span></div>
+        <div><span class="k">Energy · chip</span><span class="v" data-f="energy_kwh"></span></div>
+        <div><span class="k">Energy · software</span><span class="v" data-f="energy_sw_kwh"></span></div>
+        <div><span class="k">Exported</span><span class="v" data-f="export_kwh"></span></div>
         <div><span class="k">THD V</span><span class="v" data-f="voltage_thd"></span></div>
         <div><span class="k">THD I</span><span class="v" data-f="current_thd"></span></div>
       </div>`;
@@ -302,7 +318,8 @@ function dashboard(view) {
   const fmt = {
     power_watt: (v) => `${num(v, 0)} W`, voltage_rms: (v) => `${num(v, 1)} V`, current_rms: (v) => `${num(v, 2)} A`,
     voltage_freq: (v) => `${num(v, 2)} Hz`, power_var: (v) => `${num(v, 0)} var`, power_va: (v) => `${num(v, 0)} VA`,
-    energy_kwh: (v) => `${num(v, 3)} kWh`, voltage_thd: (v) => `${num(v, 1)} %`, current_thd: (v) => `${num(v, 1)} %`,
+    energy_kwh: (v) => `${num(v, 4)} kWh`, energy_sw_kwh: (v) => `${num(v, 4)} kWh`, export_kwh: (v) => `${num(v, 4)} kWh`,
+    voltage_thd: (v) => `${num(v, 1)} %`, current_thd: (v) => `${num(v, 1)} %`,
     pf: (v) => `PF ${num(v, 2)}`,
   };
 
@@ -344,7 +361,10 @@ function dashboard(view) {
       const m = await api(`/analytics/energy-daily?${dev()}`);
       const i = m.days.indexOf(todayStr());
       const today = i < 0 ? 0 : PHASES.reduce((s, p) => s + m.phases[p][i], 0);
+      const todaySw = i < 0 ? 0 : PHASES.reduce((s, p) => s + m.phases_sw[p][i], 0);
       $("#t-e").textContent = `${num(today, 3)} kWh`;
+      // The chip integrates continuously in hardware; the software figure is the old 1 Hz method.
+      $("#t-diff").textContent = today > 1e-6 ? `${todaySw >= today ? "+" : ""}${num((todaySw - today) / today * 100, 2)} %` : "–";
     } catch { /* ignore */ }
   });
 }
@@ -516,8 +536,9 @@ function quality(view) {
 function control(view) {
   view.innerHTML = `
     <h1>Remote control</h1>
-    <p class="muted">Switching OFF disconnects the supply to that phase. The state shown is what the meter
-      confirmed, not just what was requested.</p>
+    <p class="muted">Switching OFF disconnects the supply to that phase. The meter has the final say: it checks
+      with its own sensor that current really stopped, keeps a 3-minute minimum off-time to protect compressors,
+      won't switch ON into a faulty supply, and trips on its own on overcurrent.</p>
     <div class="row"><button id="all-on">All phases ON</button><button id="all-off" class="danger">All phases OFF</button>
       <span id="online" class="chip">–</span></div>
     <div class="grid cols-4" id="relays" style="margin-bottom:14px"></div>
@@ -527,8 +548,10 @@ function control(view) {
     const el = document.createElement("div");
     el.className = "card phase-card relay";
     el.style.setProperty("--pc", color(p));
-    el.innerHTML = `<h2>Phase ${p}</h2><div class="state" data-state>–</div>
-      <div class="btns"><button data-cmd="on">Turn ON</button><button data-cmd="off" class="danger">Turn OFF</button></div>`;
+    el.innerHTML = `<h2>Phase ${p}<span class="muted" data-amps></span></h2><div class="state" data-state>–</div>
+      <div class="muted" data-reason></div>
+      <div class="btns"><button data-cmd="on">Turn ON</button><button data-cmd="off" class="danger">Turn OFF</button></div>
+      <div class="error" data-result></div>`;
     el.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => send(p, b.dataset.cmd)));
     el.dataset.phase = p;
     $("#relays").appendChild(el);
@@ -536,22 +559,35 @@ function control(view) {
   $("#all-on").addEventListener("click", () => send("ALL", "on"));
   $("#all-off").addEventListener("click", () => send("ALL", "off"));
 
+  let lastStatus = null;
   const show = (s) => {
+    lastStatus = { ...(lastStatus || {}), ...s, fetchedAt: Date.now() };
     $("#online").textContent = s.online ? "meter online" : "meter offline";
     $("#online").className = `chip ${s.online ? "ok" : "bad"}`;
     for (const p of PHASES) {
-      const st = (s.relays || {})[p];
-      const el = $(`[data-phase="${p}"] [data-state]`);
-      el.textContent = st ? st.toUpperCase() : "unknown";
-      el.className = `state ${st || ""}`;
+      const st = (lastStatus.relays || {})[p];
+      const d = (lastStatus.details || {})[p] || {};
+      const card = $(`[data-phase="${p}"]`);
+      const el = card.querySelector("[data-state]");
+      el.textContent = d.welded ? "WELDED" : st ? st.toUpperCase() : "unknown";
+      el.className = `state ${d.welded ? "off" : st || ""}`;
+      card.querySelector("[data-amps]").textContent = d.measured_a == null ? "" : `${num(d.measured_a, 2)} A`;
+      const lines = [];
+      if (d.reason) lines.push(d.reason);
+      const left = Math.max((d.lockout_s || 0) - (Date.now() - lastStatus.fetchedAt) / 1000, 0);
+      if (left > 0) lines.push(`ON allowed in ${Math.ceil(left)} s (minimum off-time)`);
+      if ((lastStatus.mismatch || {})[p]) lines.push(`You asked for ${(lastStatus.desired || {})[p].toUpperCase()}; the meter overrode it`);
+      card.querySelector("[data-reason]").textContent = lines.join(" · ");
+      card.querySelector('[data-cmd="on"]').disabled = left > 0 || d.welded;
     }
   };
+  state.timers.push(setInterval(() => { if (lastStatus) show({ online: lastStatus.online }); }, 1000));
   const history = async () => {
     try {
       const rows = await api(`/remote-control/history?${dev()}`);
       $("#hist").innerHTML = rows.map((r) => `<tr><td>${esc(new Date(r.created_at).toLocaleString("en-GB", { timeZone: TZ }))}</td>
-        <td>${esc(r.username || "–")}</td><td>${esc(r.phase || "–")}</td><td>${esc(r.command)}</td>
-        <td>${r.ok ? "confirmed" : `failed${r.detail ? ": " + esc(r.detail) : ""}`}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">No commands yet</td></tr>';
+        <td>${esc(r.username || (r.command.startsWith("auto:") ? "meter (automatic)" : "–"))}</td><td>${esc(r.phase || "–")}</td><td>${esc(r.command)}</td>
+        <td>${r.ok ? "confirmed" : r.command.startsWith("auto:") ? `by the meter: ${esc(r.detail || "")}` : `refused / failed${r.detail ? ": " + esc(r.detail) : ""}`}</td></tr>`).join("") || '<tr><td colspan="5" class="muted">No commands yet</td></tr>';
     } catch { /* ignore */ }
   };
 
@@ -560,13 +596,19 @@ function control(view) {
     const buttons = view.querySelectorAll("button");
     buttons.forEach((b) => { b.disabled = true; });
     try {
+      view.querySelectorAll("[data-result]").forEach((x) => { x.textContent = ""; });
       const r = await api("/remote-control", { method: "POST", body: { device_id: state.device.device_id, phase, command } });
-      show({ online: true, relays: r.relays });
-      toast(`Phase ${phase} ${command.toUpperCase()} - confirmed by the meter`);
+      show({ online: true, relays: r.relays, details: r.details });
+      toast(r.unverified && r.unverified.length
+        ? `Phase ${phase} ${command.toUpperCase()} applied, but the meter had no readings to verify it`
+        : `Phase ${phase} ${command.toUpperCase()} - verified by the meter's own measurement`);
     } catch (e) {
-      toast(e.message);
+      const target = phase === "ALL" ? $("#relays") : $(`[data-phase="${phase}"] [data-result]`);
+      if (phase === "ALL") toast(e.message, 8000); else target.textContent = e.message;
+      api(`/remote-control/status?refresh=true&${dev()}`).then(show).catch(() => {});
     } finally {
       buttons.forEach((b) => { b.disabled = false; });
+      if (lastStatus) show({ online: lastStatus.online });  // re-apply lockout / welded disables at once
       history();
     }
   }
@@ -574,6 +616,100 @@ function control(view) {
   api(`/remote-control/status?refresh=true&${dev()}`).then(show).catch((e) => toast(e.message));
   history();
   state.timers.push(setInterval(() => api(`/remote-control/status?refresh=false&${dev()}`).then(show).catch(() => {}), 5000));
+}
+
+// ---------------------------------------------------------------- insights
+function insights(view) {
+  view.innerHTML = `
+    <h1>Insights</h1>
+    <div class="grid cols-2">
+      <div class="card"><h2>Bill forecast</h2><div id="bill">Loading…</div></div>
+      <div class="card"><h2>Phase balance</h2><div id="bal">Loading…</div></div>
+    </div>
+    <div class="card" style="margin-top:14px"><h2>Unbalance by hour of day</h2><div class="chart-box"><canvas id="ub"></canvas></div></div>
+    <div class="card" style="margin-top:14px"><h2>Your tariff</h2>
+      <p class="muted">Enter the slabs from your electricity bill. Rates are per unit (kWh); leave the last limit empty.</p>
+      <form id="tf" style="display:grid;gap:10px">
+        <div class="row"><label>Name <input name="name"></label><label>Currency <input name="currency" size="3"></label>
+          <label>Fixed charge <input name="fixed_charge" type="number" step="0.01" min="0"></label>
+          <label>Billing cycle starts on day <input name="cycle_start_day" type="number" min="1" max="28"></label></div>
+        <table><thead><tr><th>Up to (units)</th><th>Rate</th></tr></thead><tbody id="slabs"></tbody></table>
+        <div class="row"><button type="button" id="add-slab">Add slab</button><button class="primary">Save tariff</button></div>
+        <p class="error" id="tf-err"></p>
+      </form></div>`;
+
+  const money = (t, v) => `${t.currency}${num(v, 2)}`;
+  const loadBill = async () => {
+    try {
+      const f = await api(`/analytics/bill-forecast?${dev()}`);
+      const t = f.tariff;
+      $("#bill").innerHTML = `
+        <div class="tiles">
+          <div class="tile"><div class="k">So far (${esc(f.cycle.start)} →)</div><div class="v">${num(f.so_far.units, 1)} units</div><div class="muted">${money(t, f.so_far.total)}</div></div>
+          <div class="tile"><div class="k">Projected by ${esc(f.cycle.end)}</div><div class="v">${num(f.projected.units, 0)} units</div><div class="muted">${money(t, f.projected.total)}</div></div>
+          <div class="tile"><div class="k">Average daily use</div><div class="v">${num(f.average_daily_kwh, 1)} kWh</div><div class="muted">confidence: ${esc(f.confidence)} (${f.history_days} days of history)</div></div>
+        </div>
+        ${f.warnings.map((w) => `<p class="error">⚠ ${esc(w.text)}</p>`).join("")}
+        ${f.tip ? `<p>${esc(f.tip)}</p>` : ""}
+        <table><thead><tr><th>Slab</th><th>Units</th><th>Rate</th><th>Cost</th></tr></thead><tbody>
+          ${f.projected.slabs.map((sl) => `<tr><td>${num(sl.from, 0)}–${sl.to == null ? "∞" : num(sl.to, 0)}</td><td>${num(sl.units, 1)}</td><td>${money(t, sl.rate)}</td><td>${money(t, sl.cost)}</td></tr>`).join("")}
+          <tr><td>Fixed charge</td><td></td><td></td><td>${money(t, t.fixed_charge)}</td></tr></tbody></table>
+        ${f.tariff_is_default ? '<p class="muted">Using an example tariff: set yours below for a real forecast.</p>' : ""}`;
+    } catch (e) { $("#bill").textContent = e.message; }
+  };
+
+  const loadBalance = async () => {
+    try {
+      const b = await api(`/analytics/balance?days=14&${dev()}`);
+      const share = b.phase_share_pct;
+      $("#bal").innerHTML = `
+        <div class="tiles">
+          <div class="tile"><div class="k">Average unbalance</div><div class="v">${b.average_unbalance_pct == null ? "–" : num(b.average_unbalance_pct, 0) + " %"}</div><div class="muted">worst at ${esc(b.worst_hour || "–")} (${num(b.worst_hour_unbalance_pct, 0)} %)</div></div>
+          <div class="tile"><div class="k">Average neutral current</div><div class="v">${num(b.average_neutral_a, 2)} A</div></div>
+        </div>
+        <p>Share of load: ${PHASES.map((p) => `<span style="color:${color(p)}">${p} ${num(share[p], 0)}%</span>`).join(" · ")}</p>
+        ${b.recommendations.length ? b.recommendations.map((r) => `<p><b>💡 ${esc(r.text)}</b><br><span class="muted">Seen ${r.occurrences} times in the period.</span></p>`).join("")
+          : `<p class="muted">No phase move would make a clear difference${b.days_of_data < 3 ? " yet (needs a few days of history)" : ""}.</p>`}
+        <details><summary>Detected switchable loads (${b.loads.length})</summary><table><thead><tr><th>Phase</th><th>Size</th><th>Usually</th><th>Times</th><th>Avg run</th></tr></thead><tbody>
+          ${b.loads.map((l) => `<tr><td>${l.phase}</td><td>${num(l.kw, 2)} kW</td><td>${esc(l.usual_hours)}</td><td>${l.occurrences}</td><td>${l.avg_duration_min} min</td></tr>`).join("")}</tbody></table></details>
+        <p class="muted">Based on ${num(b.days_of_data, 1)} days. Moving a circuit to another phase is a job for an electrician.</p>`;
+      const hours = Object.keys(b.unbalance_by_hour);
+      chart($("#ub"), "bar", hours.map((h) => `${h}:00`), [{ label: "Unbalance (%)", data: Object.values(b.unbalance_by_hour), backgroundColor: css("--accent") }], { yTitle: "%" });
+    } catch (e) { $("#bal").textContent = e.message; }
+  };
+
+  const slabRow = (sl = { upto: "", rate: "" }) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td><input type="number" min="1" step="1" value="${sl.upto ?? ""}" placeholder="no limit"></td>
+      <td><input type="number" min="0" step="0.01" value="${sl.rate}"></td>`;
+    $("#slabs").appendChild(tr);
+  };
+  const loadTariff = async () => {
+    const { tariff } = await api("/analytics/tariff");
+    const f = $("#tf");
+    for (const k of ["name", "currency", "fixed_charge", "cycle_start_day"]) f[k].value = tariff[k];
+    $("#slabs").innerHTML = "";
+    tariff.slabs.forEach(slabRow);
+  };
+  $("#add-slab").addEventListener("click", () => slabRow());
+  $("#tf").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = e.target;
+    const slabs = [...$("#slabs").querySelectorAll("tr")].map((tr) => {
+      const [u, r] = tr.querySelectorAll("input");
+      return { upto: u.value === "" ? null : +u.value, rate: +r.value };
+    }).filter((sl) => !Number.isNaN(sl.rate));
+    try {
+      await api("/analytics/tariff", { method: "PUT", body: { name: f.name.value, currency: f.currency.value,
+        fixed_charge: +f.fixed_charge.value, cycle_start_day: +f.cycle_start_day.value, slabs } });
+      $("#tf-err").textContent = "";
+      toast("Tariff saved");
+      loadBill();
+    } catch (err) { $("#tf-err").textContent = err.message; }
+  });
+  loadBill();
+  loadBalance();
+  loadTariff().catch((e) => { $("#tf-err").textContent = e.message; });
 }
 
 // ---------------------------------------------------------------- password reset / account
@@ -666,10 +802,11 @@ function account(view) {
 }
 
 // ---------------------------------------------------------------- router
-const routes = { login, signup, forgot, reset, dashboard, monitor, analysis, quality, control, account };
+const routes = { login, signup, forgot, reset, dashboard, monitor, analysis, quality, control, insights, account };
 const PUBLIC = new Set(["login", "signup", "forgot", "reset"]);
 
 async function render() {
+  state.viewGen += 1;
   cleanup();
   const raw = location.hash.replace(/^#\/?/, "");
   const [name, qs] = raw.split("?");

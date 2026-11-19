@@ -1,6 +1,5 @@
 import tkinter as tk
 import sqlite3
-from tkinter import Label
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 

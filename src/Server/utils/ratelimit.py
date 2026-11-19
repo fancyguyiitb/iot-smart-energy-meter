@@ -11,7 +11,7 @@ an account. Two uses:
   isn't locked out by their own successful logins.
 
 State lives in this process. With several server workers, move it to Redis (same
-interface) - noted in docs/BUGFIXES.md.
+interface) - noted in docs/BACKLOG.md.
 """
 
 from __future__ import annotations

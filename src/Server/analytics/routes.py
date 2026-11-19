@@ -4,9 +4,12 @@ from datetime import date, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from analytics.advisor import balance_report
+from analytics.billing import DEFAULT_TARIFF, Tariff, forecast
 from analytics.helpers import TZ, daily_energy, energy_analytics, power_analytics
 from api.dependencies import get_current_user, resolve_user_device
 from storage import StorageError
+from utils.database import get_metadata_db
 
 analysis_router = APIRouter()
 
@@ -67,3 +70,35 @@ def get_daily_energy(
     if not 1 <= mon <= 12:
         raise HTTPException(status_code=400, detail="Invalid month")
     return _guard(daily_energy, year, mon, device_id)
+
+
+# ---------------------------------------------------------------------- insights (feature 5)
+@analysis_router.get("/balance")
+def get_balance(days: int = Query(14, ge=1, le=90), device_id: str | None = None,
+                user: dict = Depends(get_current_user)):
+    """Phase unbalance, movable loads and what-if moves to another phase."""
+    device_id = resolve_user_device(user, device_id)
+    return _guard(balance_report, device_id, days)
+
+
+@analysis_router.get("/tariff")
+def get_tariff(user: dict = Depends(get_current_user)):
+    saved = get_metadata_db().get_tariff(user["id"])
+    return {"tariff": saved or DEFAULT_TARIFF.model_dump(), "is_default": saved is None}
+
+
+@analysis_router.put("/tariff")
+def put_tariff(tariff: Tariff, user: dict = Depends(get_current_user)):
+    get_metadata_db().set_tariff(user["id"], tariff.model_dump())
+    return {"tariff": tariff.model_dump(), "is_default": False}
+
+
+@analysis_router.get("/bill-forecast")
+def get_bill_forecast(device_id: str | None = None, user: dict = Depends(get_current_user)):
+    """Units and cost so far this cycle, projected month-end bill, and slab-crossing warnings."""
+    device_id = resolve_user_device(user, device_id)
+    saved = get_metadata_db().get_tariff(user["id"])
+    tariff = Tariff.model_validate(saved) if saved else DEFAULT_TARIFF
+    result = _guard(forecast, device_id, tariff)
+    result["tariff_is_default"] = saved is None
+    return result

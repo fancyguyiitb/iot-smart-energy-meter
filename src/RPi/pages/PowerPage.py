@@ -2,10 +2,9 @@ import tkinter as tk
 import sqlite3
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from datetime import datetime, timedelta, date, timezone
+from datetime import datetime, timedelta, timezone
 import matplotlib.dates as mdates
 from zoneinfo import ZoneInfo
-import threading
 
 from config import DB_PATH as DB_NAME  # one DB path shared by every process
 BTN_BG = "lightgray"
@@ -163,7 +162,7 @@ class PowerPage(tk.Frame):
         if not self.update_loop_running:
             return
 
-        from datetime import datetime, date, timedelta, timezone
+        from datetime import datetime, timedelta, timezone
 
         try:
             # Define IST timezone and compute today's 24-hour window in IST.

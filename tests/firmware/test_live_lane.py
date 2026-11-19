@@ -67,3 +67,15 @@ def test_live_lane_never_marks_rows_synced():
     add_sample()
     lane.push_once()
     assert db.count_unsynced() == 4  # the durable lane still owns delivery
+
+
+def test_recovery_wakes_the_durable_lane():
+    sync.network_back.clear()
+    lane = sync.LiveLane()
+    lane.session = FakeSession(fail=True)
+    add_sample()
+    lane.push_once()
+    assert not sync.network_back.is_set()
+    lane.session = FakeSession()
+    lane.push_once()  # server reachable again
+    assert sync.network_back.is_set()  # the durable lane stops backing off and drains now

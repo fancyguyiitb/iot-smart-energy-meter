@@ -29,7 +29,8 @@ Open http://127.0.0.1:9000/ for the control panel.
 * **Supply faults per phase:** sag (0.75 pu), swell (1.15 pu), outage.
 * **Grid:** frequency drift, background voltage THD, measurement noise.
 * **Wiring faults:** loose neutral (the star point shifts towards the loaded phases), CT clamped backwards.
-* **Board:** power-cycle the chip. It forgets its configuration and the firmware must re-initialise it.
+* **Board:** power-cycle the chip (it forgets its configuration and the firmware must re-initialise it), or freeze the Pi's SPI bus for 20 s (a firmware stall: the chip keeps metering, software integration can't).
+* **Relay faults:** welded relay contacts (conduct whatever the GPIO says) and an 8.5 kW overload, to exercise the meter's closed-loop check and overcurrent trip.
 * **Scenarios:** one-click presets such as evening peak, brown-out, losing phase Y, loose neutral and solar export.
 
 The panel shows the **ground truth** (what really flows in the wires, with true import/export energy counters) next to relay and GPIO state. Compare it with the web app to check the measurement chain end to end.

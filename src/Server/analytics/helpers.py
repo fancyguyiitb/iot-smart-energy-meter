@@ -54,10 +54,14 @@ def energy_analytics(target_date: date, phase: str, device_id: str, every_s: int
     hourly = store.energy_buckets(device_id, start, end, 3600, tz_offset_s(start), phase).get(phase, [])
     series = store.series(device_id, start, end, ["energy_kwh"], phase, every_s).get(phase, [])
     consumed = sum(h["kwh"] for h in hourly)
+    consumed_sw = sum(h.get("sw_kwh", 0.0) for h in hourly)
     peak = max(hourly, key=lambda h: h["kwh"], default=None)
     return {
         "analytics_data": {
-            "consumed_kwh": consumed,
+            "consumed_kwh": consumed,  # from the metering chip's accumulators (billing)
+            "consumed_sw_kwh": consumed_sw,  # software integration on the meter (cross-check)
+            "exported_kwh": sum(h.get("export_kwh", 0.0) for h in hourly),
+            "chip_vs_software_pct": round((consumed_sw - consumed) / consumed * 100, 2) if consumed > 1e-6 else None,
             "peak_hour": peak["start"] if peak and peak["kwh"] > 0 else None,
             "peak_hour_kwh": peak["kwh"] if peak else 0.0,
             "hourly": hourly,
@@ -73,10 +77,14 @@ def daily_energy(year: int, month: int, device_id: str) -> dict:
     start, _ = day_bounds(days[0])
     _, end = day_bounds(days[-1])
     buckets = get_store().energy_buckets(device_id, start, end, 86400, tz_offset_s(start))
-    phases = {}
+    phases, phases_sw, phases_export = {}, {}, {}
     for phase in ("R", "Y", "B"):
-        by_day = {datetime.fromisoformat(b["start"]).astimezone(TZ).date(): b["kwh"] for b in buckets.get(phase, [])}
-        phases[phase] = [round(by_day.get(d, 0.0), 6) for d in days]
+        by_day = {datetime.fromisoformat(b["start"]).astimezone(TZ).date(): b for b in buckets.get(phase, [])}
+        phases[phase] = [round(by_day[d]["kwh"], 6) if d in by_day else 0.0 for d in days]
+        phases_sw[phase] = [round(by_day[d].get("sw_kwh", 0.0), 6) if d in by_day else 0.0 for d in days]
+        phases_export[phase] = [round(by_day[d].get("export_kwh", 0.0), 6) if d in by_day else 0.0 for d in days]
     totals = {p: sum(v) for p, v in phases.items()}
-    return {"days": [d.isoformat() for d in days], "phases": phases, "total_kwh": totals,
-            "month_total_kwh": sum(totals.values())}
+    return {"days": [d.isoformat() for d in days], "phases": phases, "phases_sw": phases_sw,
+            "phases_export": phases_export, "total_kwh": totals, "month_total_kwh": sum(totals.values()),
+            "month_total_sw_kwh": sum(sum(v) for v in phases_sw.values()),
+            "month_export_kwh": sum(sum(v) for v in phases_export.values())}

@@ -2,12 +2,9 @@ import tkinter as tk
 import sqlite3
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from datetime import datetime, timedelta, date, timezone
+from datetime import datetime, timedelta
 import matplotlib.dates as mdates
-from matplotlib.ticker import ScalarFormatter
 from zoneinfo import ZoneInfo
-from matplotlib.ticker import FuncFormatter
-from matplotlib.ticker import ScalarFormatter
 import numpy as np
 
 from config import DB_PATH as DB_NAME  # one DB path shared by every process
@@ -36,7 +33,7 @@ class EnergyPage(tk.Frame):
         btn_font = ("Arial", 30)
 
         # --- Value Type Buttons ---
-        value_types = {"Energy": ["Energy_E"]}
+        # value_types = {"Energy": ["Energy_E"]}  (single series; buttons below were disabled)
         # for i, (label, values) in enumerate(value_types.items()):
         #     btn = tk.Button(self.main_panel, text=label, font=btn_font,
         #                     command=lambda v=values, l=label: self.set_value_type(v, l),

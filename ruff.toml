@@ -1,0 +1,18 @@
+# Lint config: `python -m ruff check .` (also run by scripts/run_tests.py)
+target-version = "py311"
+line-length = 120
+extend-exclude = ["src/Application"]
+
+[lint]
+select = ["F", "E9", "B", "PLE"]
+ignore = [
+    "B008",  # FastAPI's Depends()/Query() in argument defaults is the intended pattern
+    "B904",  # raise ... from inside except: not always wanted for HTTPException
+    "B905",  # zip(strict=...): style only
+    "B027",  # empty optional hooks in the storage base class are intentional
+]
+
+[lint.per-file-ignores]
+# Vendor-style ADE9000 driver: register maps are star-imported on purpose.
+"src/RPi/ADE9000*.py" = ["F403", "F405"]
+"src/RPi/pages/*.py" = ["B007"]

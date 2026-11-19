@@ -1,5 +1,5 @@
-"""Run both test suites. They run in separate processes because the firmware and the
-server each have a top-level ``config`` module.
+"""Lint, then run both test suites. The suites run in separate processes because the
+firmware and the server each have a top-level ``config`` module.
 
     python scripts/run_tests.py
 """
@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-codes = [subprocess.call([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(ROOT / "tests" / suite)])
+codes = [subprocess.call([sys.executable, "-m", "ruff", "check", str(ROOT)])]
+codes += [subprocess.call([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(ROOT / "tests" / suite)])
          for suite in ("firmware", "server")]
 sys.exit(max(codes))

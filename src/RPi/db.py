@@ -79,7 +79,9 @@ CREATE TABLE IF NOT EXISTS meter_state (
 COLUMNS = (
     "phase", "voltage_rms", "current_rms", "active_power", "reactive_power", "apparent_power",
     "energy_kwh", "voltage_thd", "current_thd", "power_factor", "voltage_freq", "timestamp",
+    "energy_sw_kwh", "export_kwh",
 )
+COUNTERS = ("energy_kwh", "energy_sw_kwh", "export_kwh")
 
 
 def connect() -> sqlite3.Connection:
@@ -98,6 +100,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE power_events ADD COLUMN restored_time TEXT")
         if "sync" not in cols:
             conn.execute("ALTER TABLE power_events ADD COLUMN sync BOOLEAN DEFAULT 0")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(power_data)")}
+        for col in ("energy_sw_kwh", "export_kwh"):  # added with chip-accumulator metering
+            if col not in cols:
+                conn.execute(f"ALTER TABLE power_data ADD COLUMN {col} REAL")
 
 
 def now_local_iso() -> str:
@@ -191,6 +197,8 @@ def _format_row(row) -> dict:
         "current_thd": r["current_thd"] or 0.0,
         "power_factor": r["power_factor"] or 0.0,
         "voltage_freq": r["voltage_freq"] or 0.0,
+        "energy_sw_kwh": r["energy_sw_kwh"] or 0.0,
+        "export_kwh": r["export_kwh"] or 0.0,
         "time": to_utc_iso(r["timestamp"]),
     }
 
@@ -252,6 +260,22 @@ def get_last_energy(phase: str) -> tuple[float, str | None]:
     finally:
         conn.close()
     return (row[0] or 0.0, row[1]) if row else (0.0, None)
+
+
+def get_last_counters(phase: str) -> tuple[dict[str, float], str | None]:
+    """Latest value of every energy counter for a phase, and its timestamp (local ISO)."""
+    conn = connect()
+    try:
+        row = conn.execute(f"SELECT {', '.join(COUNTERS)}, timestamp FROM power_data WHERE phase = ? "
+                           "ORDER BY id DESC LIMIT 1", (phase,)).fetchone()
+    except sqlite3.Error as e:
+        l.eprint("Error fetching last energy:", e)
+        return {}, None
+    finally:
+        conn.close()
+    if not row:
+        return {}, None
+    return {c: v or 0.0 for c, v in zip(COUNTERS, row[:-1])}, row[-1]
 
 
 def get_last_max_energy(phase):

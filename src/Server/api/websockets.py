@@ -46,7 +46,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 l.eprint(f"{device_id}: ignoring non-JSON frame")
                 continue
             if isinstance(message, dict):
-                hub.handle_message(device_id, message)
+                event = hub.handle_message(device_id, message)
+                if event:  # the meter acted on its own (overcurrent trip, welded relay): audit it
+                    l.eprint(f"{device_id}: phase {event['phase']} {event['action']}: {event['reason']}")
+                    await run_in_threadpool(get_metadata_db().log_relay, device_id, None, event["phase"],
+                                            f"auto:{event['action']}", False, event["reason"])
     except WebSocketDisconnect:
         pass
     except Exception as e:
@@ -70,9 +74,17 @@ async def send_command(cmd: RelayCommand, user: dict = Depends(get_current_user)
         raise HTTPException(status_code=504, detail="Meter did not confirm the command in time")
     await run_in_threadpool(db.log_relay, device_id, user["id"], cmd.phase, cmd.command,
                             bool(ack.get("ok")), ack.get("error"))
+    # Desired state follows what the owner asked for on the phases the meter accepted.
+    accepted = [p for p, r in (ack.get("results") or {}).items() if r.get("ok")] or                (([cmd.phase] if cmd.phase != "ALL" else ["R", "Y", "B"]) if ack.get("ok") else [])
+    if accepted:
+        await run_in_threadpool(db.set_desired, device_id, accepted, cmd.command)
     if not ack.get("ok"):
-        raise HTTPException(status_code=502, detail=f"Meter refused the command: {ack.get('error')}")
-    return {"status": "confirmed", "relays": ack.get("relays")}
+        # The meter's safety logic said no (interlock) or the switch failed verification
+        # (welded contacts). Its message explains why; the app shows it as is.
+        raise HTTPException(status_code=409, detail=ack.get("error") or "Meter refused the command")
+    unverified = [p for p, r in (ack.get("results") or {}).items() if not r.get("verified", True)]
+    return {"status": "confirmed" if not unverified else "applied, not verified",
+            "relays": ack.get("relays"), "details": ack.get("details"), "unverified": unverified}
 
 
 @ws_router.get("/remote-control/status")
@@ -84,7 +96,13 @@ async def get_status(device_id: str | None = None, refresh: bool = True, user: d
             await hub.send_command(device_id, "status", None, settings.command_timeout_seconds)
         except (DeviceOffline, asyncio.TimeoutError):
             pass  # fall back to the last reported state
-    return hub.status(device_id)
+    status = hub.status(device_id)
+    desired = await run_in_threadpool(get_metadata_db().get_desired, device_id)
+    status["desired"] = {p: desired.get(p) for p in ("R", "Y", "B")}
+    # A mismatch means the meter overrode the owner: overcurrent trip, welded contacts, ...
+    status["mismatch"] = {p: bool(desired.get(p) and status["relays"].get(p) and desired[p] != status["relays"][p])
+                          for p in ("R", "Y", "B")}
+    return status
 
 
 @ws_router.get("/remote-control/history")

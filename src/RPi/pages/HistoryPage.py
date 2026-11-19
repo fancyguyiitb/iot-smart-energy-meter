@@ -1,14 +1,11 @@
 import tkinter as tk
 from tkinter import ttk
-import sqlite3
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from datetime import datetime, timedelta, date
 import matplotlib.dates as mdates
 from zoneinfo import ZoneInfo
-import numpy as np  # ensure this is imported at the top if not already
 from calendar import monthrange
-import threading
 
 from db import get_daily_energy
 BTN_BG = "lightgray"
@@ -56,7 +53,6 @@ class HistoryPage(tk.Frame):
         ]
         current_year = datetime.now().year
 
-        months = list(range(1, 13))
         years = list(range(current_year - 5, current_year + 1))
 
         tk.Label(

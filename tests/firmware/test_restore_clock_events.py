@@ -33,28 +33,28 @@ def test_restore_waits_for_server_when_nothing_local(monkeypatch):
     answers = [None, None, remote([5.0, 6.0, 7.0])]  # offline twice, then reachable
     monkeypatch.setattr(api, "get_remote_last_energy", lambda: answers.pop(0))
     slept = []
-    restored = api.restore_energy(retry_s=60, sleep=slept.append)
+    restored = api.restore_energy(retry_s=60, sleep=slept.append)["energy_kwh"]
     assert restored == {"R": 5.0, "Y": 6.0, "B": 7.0}  # used to be 0, 0, 0
     assert len(slept) == 2
 
 
 def test_restore_gives_up_after_retry_window(monkeypatch):
     monkeypatch.setattr(api, "get_remote_last_energy", lambda: None)
-    restored = api.restore_energy(retry_s=5, sleep=lambda s: None)
+    restored = api.restore_energy(retry_s=5, sleep=lambda s: None)["energy_kwh"]
     assert restored == {"R": 0.0, "Y": 0.0, "B": 0.0}
 
 
 def test_state_file_survives_a_lost_database(monkeypatch):
-    api.save_energy_state({"R": 1.5, "Y": 2.5, "B": 3.5}, "2025-06-01T10:00:00+05:30")
+    api.save_energy_state({"energy_kwh": {"R": 1.5, "Y": 2.5, "B": 3.5}}, "2025-06-01T10:00:00+05:30")
     monkeypatch.setattr(api, "get_remote_last_energy", lambda: None)  # and the server is down
-    assert api.restore_energy(retry_s=0, sleep=lambda s: None) == {"R": 1.5, "Y": 2.5, "B": 3.5}
+    assert api.restore_energy(retry_s=0, sleep=lambda s: None)["energy_kwh"] == {"R": 1.5, "Y": 2.5, "B": 3.5}
 
 
 def test_restore_prefers_the_newest_source(monkeypatch):
     db.insert_samples([row("R", "2025-06-01T10:00:00+05:30", 9.0)])  # local, newest
-    api.save_energy_state({"R": 1.0, "Y": 2.0, "B": 3.0}, "2025-05-01T10:00:00+05:30")
+    api.save_energy_state({"energy_kwh": {"R": 1.0, "Y": 2.0, "B": 3.0}}, "2025-05-01T10:00:00+05:30")
     monkeypatch.setattr(api, "get_remote_last_energy", lambda: remote([4.0, 5.0, 6.0]))
-    restored = api.restore_energy(retry_s=0, sleep=lambda s: None)
+    restored = api.restore_energy(retry_s=0, sleep=lambda s: None)["energy_kwh"]
     assert restored["R"] == 9.0  # local DB is newest for R
     assert restored["Y"] == 2.0  # state file (May) beats server (Jan) for Y
 

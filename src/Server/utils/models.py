@@ -11,7 +11,12 @@ from pydantic import AwareDatetime, BaseModel, Field, field_validator
 PHASES = ("R", "Y", "B")
 Phase = Literal["R", "Y", "B", "Neutral"]
 READING_FIELDS = ("voltage_rms", "current_rms", "power_watt", "power_var", "power_va", "power_factor",
-                  "voltage_thd", "current_thd", "energy_kwh", "voltage_freq")
+                  "voltage_thd", "current_thd", "energy_kwh", "voltage_freq", "energy_sw_kwh", "export_kwh")
+# Cumulative counters (summed as consumption in rollups, never averaged):
+#   energy_kwh    import energy from the metering chip's accumulators (billing)
+#   energy_sw_kwh import energy integrated in software on the meter (cross-check)
+#   export_kwh    export energy from the chip's accumulators
+COUNTER_FIELDS = ("energy_kwh", "energy_sw_kwh", "export_kwh")
 
 
 class Reading(BaseModel):
@@ -35,6 +40,8 @@ class Reading(BaseModel):
     current_thd: float = 0.0
     energy_kwh: float = 0.0
     voltage_freq: float = 0.0
+    energy_sw_kwh: float = 0.0
+    export_kwh: float = 0.0
 
     @field_validator(*READING_FIELDS)
     @classmethod

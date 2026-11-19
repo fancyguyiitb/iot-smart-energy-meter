@@ -43,7 +43,8 @@ class TimeSeriesStore(ABC):
     @abstractmethod
     def energy_buckets(self, device_id: str, start: datetime, end: datetime, bucket_s: int,
                        tz_offset_s: int, phase: str | None = None) -> dict[str, list[dict]]:
-        """Energy *consumed* per bucket: {phase: [{"start": iso, "kwh": float}, ...]}.
+        """Energy *consumed* per bucket: {phase: [{"start": iso, "kwh": float, "sw_kwh": float,
+        "export_kwh": float}, ...]} (chip import, software import, chip export).
 
         Computed as the sum of positive steps of the cumulative ``energy_kwh`` counter, so
         a counter reset doesn't produce negative (or wildly wrong) consumption. Buckets
@@ -61,7 +62,8 @@ class TimeSeriesStore(ABC):
 
     def last_energy(self, device_id: str) -> dict[str, dict]:
         latest = self.latest(device_id)
-        return {p: {"timestamp": v["timestamp"], "energy_kwh": v.get("energy_kwh")}
+        return {p: {"timestamp": v["timestamp"], "energy_kwh": v.get("energy_kwh"),
+                    "energy_sw_kwh": v.get("energy_sw_kwh"), "export_kwh": v.get("export_kwh")}
                 for p, v in latest.items() if p in ENERGY_PHASES}
 
     def run_maintenance(self) -> dict:

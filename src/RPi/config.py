@@ -77,6 +77,17 @@ RELAY_PINS = {
 }
 RELAY_ACTIVE_HIGH = _bool("RELAY_ACTIVE_HIGH", "true")
 
+# Switching safety (enforced on the meter, works without the cloud)
+MIN_OFF_TIME_S = float(os.getenv("MIN_OFF_TIME_S", "180"))  # protect compressors (AC, fridge)
+MAX_SWITCHES_PER_WINDOW = int(os.getenv("MAX_SWITCHES_PER_WINDOW", "6"))  # anti-chatter
+SWITCH_WINDOW_S = float(os.getenv("SWITCH_WINDOW_S", "600"))
+TRIP_CURRENT_A = float(os.getenv("TRIP_CURRENT_A", "32"))  # local overcurrent trip
+TRIP_DELAY_S = float(os.getenv("TRIP_DELAY_S", "2"))
+SUPPLY_MIN_V = float(os.getenv("SUPPLY_MIN_V", "195"))  # refuse ON outside 0.85-1.10 pu of 230 V
+SUPPLY_MAX_V = float(os.getenv("SUPPLY_MAX_V", "253"))
+VERIFY_OFF_CURRENT_A = float(os.getenv("VERIFY_OFF_CURRENT_A", "0.05"))
+VERIFY_TIMEOUT_S = float(os.getenv("VERIFY_TIMEOUT_S", "3"))
+
 FAILURE_VOLTAGE_V = float(os.getenv("FAILURE_VOLTAGE_V", "10"))
 LIVE_DATA_MAX_AGE_S = float(os.getenv("LIVE_DATA_MAX_AGE_S", "5"))
 CLAIM_CODE_REFRESH_S = int(os.getenv("CLAIM_CODE_REFRESH_S", "300"))

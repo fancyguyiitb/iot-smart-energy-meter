@@ -8,6 +8,9 @@
       claim key, and writes the device's env file. Use --rotate to issue new secrets.
 
   python manage.py list-devices
+
+  python manage.py seed-history --device-id meter-001 --days 14
+      Synthetic demo history (ends before the meter's first real reading).
 """
 
 from __future__ import annotations
@@ -93,6 +96,9 @@ def main() -> None:
     p.add_argument("--hal", choices=["virtual", "hardware"], default="virtual")
     p.add_argument("--rotate", action="store_true")
     sub.add_parser("list-devices")
+    sd = sub.add_parser("seed-history", help="write N days of synthetic history for demos (before real data)")
+    sd.add_argument("--device-id", required=True)
+    sd.add_argument("--days", type=int, default=14)
     args = parser.parse_args()
 
     if args.cmd == "init-env":
@@ -101,6 +107,10 @@ def main() -> None:
     sys.path.insert(0, str(SERVER_DIR))
     if args.cmd == "provision-device":
         provision_device(args.device_id, args.env_out, args.server_url, args.hal, args.rotate, args.name)
+    elif args.cmd == "seed-history":
+        from seed_history import seed
+
+        print(f"Wrote {seed(args.device_id, args.days)} synthetic readings for {args.device_id}")
     elif args.cmd == "list-devices":
         from utils.database import get_metadata_db
 

@@ -4,7 +4,7 @@ FastAPI backend. It authenticates users and meters, ingests readings, serves ana
 
 ![System Architecture](EDL.png)
 
-The architecture rationale is in [DOC.md](./DOC.md). Known limitations and planned features are in [docs/BUGFIXES.md](../../docs/BUGFIXES.md).
+The architecture rationale is in [DOC.md](./DOC.md). Known limitations and planned features are in [docs/BACKLOG.md](../../docs/BACKLOG.md).
 
 ---
 
@@ -100,7 +100,10 @@ User routes need `Authorization: Bearer <token>` from `/auth/login` or `/auth/si
 | `GET /api/query-data`, `GET /api/thd-values` | user | Preset series (power/V/I/energy; THD/PF/frequency) |
 | `GET /analytics/power`, `/analytics/energy`, `/analytics/energy-daily` | user | Power stats, consumption by hour, consumption by day |
 | `POST /remote-control` | user | `{phase: R/Y/B/ALL, command: on/off}`. Waits for the meter's confirmation |
-| `GET /remote-control/status`, `/remote-control/history` | user | Relay state, audit log |
+| `GET /remote-control/status`, `/remote-control/history` | user | Relay shadow (desired vs reported, safety details, mismatch) and audit log, including the meter's automatic trips |
+| `GET /analytics/balance?days=14` | user | Phase unbalance, detected switchable loads, recommended phase moves |
+| `GET /analytics/bill-forecast` | user | Units and cost so far, projected bill, slab-crossing warnings, saving tip |
+| `GET/PUT /analytics/tariff` | user | The user's slab tariff (an example one until set) |
 | `WS /ws` | device | Relay commands and acknowledgements |
 | `WS /ws/live` | user | Live samples pushed to the browser. First message: `{"token": "..."}` |
 | `GET /api/health` | public | Storage reachability |

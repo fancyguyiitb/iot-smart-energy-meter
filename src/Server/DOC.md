@@ -63,29 +63,24 @@ This document describes the overall architecture of our server application, the 
      - Assuming 8 bytes per float, that’s roughly `4.66 MB` over 6 hours (plus some overhead for SQLite).
    - After the RPi successfully sends cached data to the server (and if it’s older than 3 days), it is deleted to free space.
 
-## Server Setup Details
+## Server Setup Details (current)
+
+The endpoint reference is in [README.md](./README.md#api); the interactive version is at `/docs`.
 
 1. **Authentication**
+   - Users: JWT from `/auth/login` or `/auth/sign-up`, carrying a token version so a password change or "log out everywhere" ends every session. Passwords are PBKDF2-hashed; login and sign-up are rate-limited with per-account lockout; password reset uses single-use, hashed, 15-minute email links.
+   - Meters: each has its own key (`X-Device-Id` / `X-Device-Key`), issued by `manage.py provision-device`. Only its hash is stored.
+   - Sign-up proves physical access: the meter shows a short-lived, one-time QR code encrypted with its own claim key.
 
-   - We use a token-based approach (e.g., JWT or similar).
-   - Incoming requests (e.g., from the Flutter app) must include a valid token, which the server verifies (`verify_token`) before granting access to protected endpoints.
+2. **Two data paths from the meter**
+   - Durable (`POST /api/write-data`, every 10 s): batched, acknowledged, idempotent; the meter buffers while offline.
+   - Live (`POST /api/live`, every second): newest sample only, best effort, pushed to browsers over `WS /ws/live`.
 
-2. **REST Endpoints**
+3. **Storage** (`storage/`): one interface, two backends. SQLite locally (raw 1 Hz data, hourly and daily rollups, retention); InfluxDB in the cloud (native retention and downsampling tasks, `deploy/influx_downsampling.flux`). Users, meters, the relay shadow and audit log live in a relational DB (`utils/database.py`).
 
-   - **Data Ingestion** (`/write-data`): The RPi sends sensor data here.
-   - **Data Queries** (`/query-data`, `/latest-values`, `/thd-values`, etc.): The Flutter app (or any other client) requests historical or real-time metrics.
-   - **Analytics** (`/fetch-analytics`): Returns computed insights from InfluxDB.
+4. **Remote control** (`WS /ws`): the meter keeps an authenticated WebSocket open. `POST /remote-control` sends a command and waits for the meter's acknowledgement, which only comes after the meter has applied its safety checks (interlocks, closed-loop verification). The server keeps desired vs reported state and audits automatic actions such as overcurrent trips.
 
-3. **WebSockets**
-
-   - **Endpoint** (`/ws`): The RPi establishes a persistent WebSocket connection.
-   - **Usage**:
-     - **Real-Time Commands**: The Flutter app can send commands (e.g., toggling a phase) to the RPi by hitting the `/remote-control` endpoint. The server forwards these commands over the open WebSocket.
-     - **Status Updates**: The RPi can respond back with immediate status or acknowledgement messages.
-
-4. **InfluxDB Integration**
-   - **Write Operations**: The server uses InfluxDB’s client libraries (`write_api`) to store time-series data from the RPi.
-   - **Query Operations**: The server retrieves data and analytics from InfluxDB to respond to client queries.
+5. **Analytics** (`analytics/`): computed on read from the rollups: consumption per hour/day, power statistics, phase-balance advice and bill forecasts.
 
 ## Conclusion
 
@@ -93,7 +88,7 @@ Our architecture is designed for:
 
 - **Efficiency** in handling real-time sensor data.
 - **Scalability** via InfluxDB’s time-series capabilities.
-- **Flexibility** for cross-platform clients thanks to Flutter.
+- **Flexibility** for clients: a web app today, the Flutter app once rewritten.
 - **Reliability** with SQLite as a local fallback store on the RPi.
 
 This setup ensures robust data collection, easy remote control, and a smooth user experience for monitoring and managing power parameters in real-time.

@@ -86,6 +86,7 @@ class PhaseSupply:
     custom_kw: float = 0.0  # extra adjustable load; negative = generation (export)
     custom_pf: float = 0.95
     ct_reversed: bool = False  # CT clamped the wrong way round -> measured P/Q sign flips
+    welded: bool = False  # relay contacts welded shut: conducts whatever the GPIO says
 
 
 @dataclass
@@ -150,7 +151,7 @@ class Installation:
             for p in PHASES:
                 sup = self.supply[p]
                 v_src = sup.nominal_v * MODE_FACTOR[sup.mode] * (1.0 + rnd(0.0, 0.002))
-                closed = self.relay_closed[p]
+                closed = self.relay_closed[p] or sup.welded
                 v = v_src
                 p_tot = q_tot = 0.0
                 harm_sq = 0.0
@@ -298,6 +299,10 @@ class Installation:
                 self.supply["R"].custom_kw = -2.5
             elif name == "reversed_ct":
                 self.supply["B"].ct_reversed = True
+            elif name == "welded_relay_y":
+                self.supply["Y"].welded = True
+            elif name == "overload_b":
+                self.supply["B"].custom_kw = 8.5  # ~37 A: above the meter's 32 A trip
             elif name == "harmonics":
                 self.grid.voltage_thd = 7.5
                 for a in self.appliances.values():
@@ -315,7 +320,9 @@ class Installation:
                 "supply": {p: asdict(s) for p, s in self.supply.items()},
                 "grid": asdict(self.grid),
                 "relays": dict(self.relay_closed),
-                "appliances": [asdict(a) | {"drawing": a.drawing(time.time()) and self.relay_closed[a.phase]
+                "contacts": {p: self.relay_closed[p] or self.supply[p].welded for p in PHASES},
+                "appliances": [asdict(a) | {"drawing": a.drawing(time.time())
+                                            and (self.relay_closed[a.phase] or self.supply[a.phase].welded)
                                             and self.supply[a.phase].mode != "outage"}
                                for a in self.appliances.values()],
             }

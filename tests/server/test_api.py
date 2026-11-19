@@ -155,7 +155,8 @@ def test_command_waits_for_device_ack(client, auth):  # M7
         ws.send_json({"type": "ack", "id": cmd["id"], "ok": True, "relays": {"R": "on", "Y": "off", "B": "on"}})
         t.join(5)
     assert result["r"].status_code == 200
-    assert result["r"].json() == {"status": "confirmed", "relays": {"R": "on", "Y": "off", "B": "on"}}
+    assert result["r"].json()["status"] == "confirmed"
+    assert result["r"].json()["relays"] == {"R": "on", "Y": "off", "B": "on"}
     hist = client.get("/remote-control/history", headers=auth).json()
     assert hist[0]["command"] == "off" and hist[0]["ok"] == 1
 

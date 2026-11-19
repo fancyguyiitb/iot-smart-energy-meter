@@ -51,6 +51,20 @@ CREATE TABLE IF NOT EXISTS relay_audit (
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_relay_audit_device ON relay_audit(device_id, id);
+-- Relay shadow: the state the owner last asked for, per phase (reported state comes from the meter).
+CREATE TABLE IF NOT EXISTS relay_shadow (
+    device_id TEXT NOT NULL,
+    phase TEXT NOT NULL,
+    desired TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (device_id, phase)
+);
+-- Electricity tariff per user (JSON), used for bill forecasts.
+CREATE TABLE IF NOT EXISTS tariffs (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    tariff TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 -- Password reset: only a hash of the token is stored; single use; short expiry.
 CREATE TABLE IF NOT EXISTS reset_tokens (
     token_hash TEXT PRIMARY KEY,
@@ -216,6 +230,34 @@ class MetadataDB:
                 raise ClaimError(409, "This meter is already registered to another account. "
                                       "The current owner must release it first.")
             return user_id
+
+    # ------------------------------------------------------------------ relay shadow
+    def set_desired(self, device_id: str, phases: list[str], desired: str) -> None:
+        with self.connect() as c:
+            c.executemany("INSERT INTO relay_shadow (device_id, phase, desired, updated_at) VALUES (?, ?, ?, ?) "
+                          "ON CONFLICT(device_id, phase) DO UPDATE SET desired = excluded.desired, "
+                          "updated_at = excluded.updated_at", [(device_id, p, desired, _now()) for p in phases])
+
+    def get_desired(self, device_id: str) -> dict[str, str]:
+        with self.connect() as c:
+            return {r["phase"]: r["desired"] for r in
+                    c.execute("SELECT phase, desired FROM relay_shadow WHERE device_id = ?", (device_id,))}
+
+    # ------------------------------------------------------------------ tariff
+    def get_tariff(self, user_id: int) -> dict | None:
+        import json
+
+        with self.connect() as c:
+            row = c.execute("SELECT tariff FROM tariffs WHERE user_id = ?", (user_id,)).fetchone()
+        return json.loads(row["tariff"]) if row else None
+
+    def set_tariff(self, user_id: int, tariff: dict) -> None:
+        import json
+
+        with self.connect() as c:
+            c.execute("INSERT INTO tariffs (user_id, tariff, updated_at) VALUES (?, ?, ?) ON CONFLICT(user_id) "
+                      "DO UPDATE SET tariff = excluded.tariff, updated_at = excluded.updated_at",
+                      (user_id, json.dumps(tariff), _now()))
 
     # ------------------------------------------------------------------ audit
     def log_relay(self, device_id: str, user_id: int | None, phase: str | None, command: str, ok: bool,

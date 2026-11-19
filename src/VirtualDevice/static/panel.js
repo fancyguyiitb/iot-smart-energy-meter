@@ -43,6 +43,8 @@ function buildPhases() {
     custom.addEventListener("change", () => { editing = false; post(`/api/phase/${p}`, { custom_kw: +custom.value }); });
     node.querySelector(".in-ct").addEventListener("change", (e) =>
       post(`/api/phase/${p}`, { ct_reversed: e.target.checked }));
+    node.querySelector(".in-welded").addEventListener("change", (e) =>
+      post(`/api/phase/${p}`, { welded: e.target.checked }));
     container.appendChild(node);
     phaseEls[p] = node;
   }
@@ -63,6 +65,7 @@ function bindGrid() {
   document.querySelectorAll("[data-scenario]").forEach((b) =>
     b.addEventListener("click", () => post(`/api/scenario/${b.dataset.scenario}`)));
   document.getElementById("btn-reset-truth").addEventListener("click", () => post("/api/reset-truth-energy"));
+  document.getElementById("btn-stall").addEventListener("click", () => post("/api/chip/stall-spi", { seconds: 20 }));
   document.getElementById("btn-power-cycle").addEventListener("click", () => {
     if (confirm("Simulate a board power loss? The firmware must re-initialise the ADE9000.")) post("/api/chip/power-cycle");
   });
@@ -99,10 +102,10 @@ function render(s) {
     totalP += truth.active_w;
     totalE += truth.energy_import_wh;
     const gpio = s.gpio.find((g) => g.phase === p);
-    const closed = s.relays[p];
+    const closed = s.contacts[p];  // what the contacts really do (welded contacts conduct)
     el.querySelector(".led").className = `led ${closed ? "on" : ""}`;
     el.querySelector(".relay-text").textContent =
-      `Relay ${closed ? "CLOSED" : "OPEN"} · GPIO${gpio ? gpio.pin : "?"}=${gpio ? gpio.level : "?"}${gpio && !gpio.mode ? " (not set up)" : ""}`;
+      `Contacts ${closed ? "CLOSED" : "OPEN"}${supply.welded ? " (WELDED)" : ""} · GPIO${gpio ? gpio.pin : "?"}=${gpio ? gpio.level : "?"}${gpio && !gpio.mode ? " (not set up)" : ""}`;
     el.querySelectorAll(".modes button").forEach((b) => b.classList.toggle("active", b.dataset.mode === supply.mode));
     for (const span of el.querySelectorAll("[data-f]")) span.textContent = fmt[span.dataset.f](truth[span.dataset.f]);
     if (!editing) {
@@ -110,6 +113,7 @@ function render(s) {
       el.querySelector(".out-custom").textContent = `${supply.custom_kw.toFixed(1)} kW`;
     }
     el.querySelector(".in-ct").checked = supply.ct_reversed;
+    el.querySelector(".in-welded").checked = supply.welded;
 
     const list = el.querySelector(".appliances");
     const items = s.appliances.filter((a) => a.phase === p);

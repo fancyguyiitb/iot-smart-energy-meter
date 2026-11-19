@@ -30,13 +30,17 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from storage.base import ENERGY_PHASES, StorageError, TimeSeriesStore
-from utils.models import READING_FIELDS, PowerEvent, Reading
+from utils.models import COUNTER_FIELDS, READING_FIELDS, PowerEvent, Reading
 
-ROLLUP_FIELDS = tuple(f for f in READING_FIELDS if f != "energy_kwh")
+ROLLUP_FIELDS = tuple(f for f in READING_FIELDS if f not in COUNTER_FIELDS)
+# rollup column holding the consumption of each counter in the bucket
+CONSUMED = {"energy_kwh": "consumed_kwh", "energy_sw_kwh": "consumed_sw_kwh", "export_kwh": "exported_kwh"}
 _ROLLUP_COLS = ", ".join(f"{f}_{s} REAL" for f in ROLLUP_FIELDS for s in ("avg", "min", "max"))
 HOUR = 3600
 DAY = 86400
 RETENTION_EVERY_S = 3600
+ROLLUP_CHUNK = 24  # hours re-rolled per transaction
+RETENTION_CHUNK = 20_000  # raw rows deleted per transaction
 
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS readings (
@@ -46,6 +50,11 @@ CREATE TABLE IF NOT EXISTS readings (
     {", ".join(f"{f} REAL" for f in READING_FIELDS)},
     PRIMARY KEY (device_id, phase, ts)
 ) WITHOUT ROWID;
+-- Rollups, series and retention filter by device + time across phases; the primary key
+-- (device, phase, ts) can't serve that, so without this index each hourly re-roll
+-- scanned the device's whole history while holding the write lock.
+CREATE INDEX IF NOT EXISTS idx_readings_device_ts ON readings(device_id, ts);
+CREATE INDEX IF NOT EXISTS idx_readings_ts ON readings(ts);
 
 CREATE TABLE IF NOT EXISTS power_events (
     device_id TEXT NOT NULL,
@@ -63,13 +72,13 @@ CREATE TABLE IF NOT EXISTS rollup_dirty (
 
 CREATE TABLE IF NOT EXISTS readings_hourly (
     device_id TEXT NOT NULL, phase TEXT NOT NULL, bucket_ts REAL NOT NULL, samples INTEGER NOT NULL,
-    {_ROLLUP_COLS}, consumed_kwh REAL, energy_kwh_last REAL,
+    {_ROLLUP_COLS}, consumed_kwh REAL, energy_kwh_last REAL, consumed_sw_kwh REAL, exported_kwh REAL,
     PRIMARY KEY (device_id, phase, bucket_ts)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS readings_daily (
     device_id TEXT NOT NULL, phase TEXT NOT NULL, bucket_ts REAL NOT NULL, samples INTEGER NOT NULL,
-    {_ROLLUP_COLS}, consumed_kwh REAL, energy_kwh_last REAL,
+    {_ROLLUP_COLS}, consumed_kwh REAL, energy_kwh_last REAL, consumed_sw_kwh REAL, exported_kwh REAL,
     PRIMARY KEY (device_id, phase, bucket_ts)
 ) WITHOUT ROWID;
 """
@@ -99,6 +108,7 @@ class SQLiteStore(TimeSeriesStore):
         self._last_retention = 0.0
         with self._conn() as conn:
             conn.executescript(SCHEMA)
+            self._migrate(conn)
             # First start after upgrading: roll up the raw history that predates rollups.
             if conn.execute("SELECT 1 FROM readings LIMIT 1").fetchone() and \
                     not conn.execute("SELECT 1 FROM readings_hourly LIMIT 1").fetchone() and \
@@ -106,6 +116,18 @@ class SQLiteStore(TimeSeriesStore):
                 halves = conn.execute("SELECT DISTINCT device_id, CAST(ts / 1800 AS INTEGER) FROM readings")
                 conn.executemany("INSERT OR IGNORE INTO rollup_dirty VALUES (?, ?)",
                                  {(d, self._hour_start(h * 1800)) for d, h in halves})
+
+    @staticmethod
+    def _migrate(conn) -> None:
+        """Add columns introduced after a database was created (new fields, new counters)."""
+        wanted = {"readings": [(f, "REAL") for f in READING_FIELDS],
+                  "readings_hourly": [("consumed_sw_kwh", "REAL"), ("exported_kwh", "REAL")],
+                  "readings_daily": [("consumed_sw_kwh", "REAL"), ("exported_kwh", "REAL")]}
+        for table, cols in wanted.items():
+            have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            for name, kind in cols:
+                if name not in have:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
     def _conn(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -148,46 +170,55 @@ class SQLiteStore(TimeSeriesStore):
 
     # ------------------------------------------------------------------ rollups
     def refresh_rollups(self) -> tuple[int, int]:
-        """Re-roll every dirty hour and the days containing them. Returns (hours, days)."""
+        """Re-roll every dirty hour and the days containing them. Returns (hours, days).
+
+        Work is done in small chunks, each in its own short transaction (claim the chunk's
+        dirty marks + re-roll them), so the write lock is released between chunks and
+        meter uploads never wait behind a large backfill. A failed chunk rolls back,
+        which puts its dirty marks back automatically.
+        """
         with self._rollup_lock:
             conn = self._conn()
-            with conn:
-                # Claim the dirty set atomically; a write during the re-roll marks its hour
-                # dirty again and it is picked up next time.
-                dirty = conn.execute("DELETE FROM rollup_dirty RETURNING device_id, bucket_ts").fetchall()
-            if not dirty:
-                return 0, 0
-            days = set()
-            try:
+            hours, days = 0, set()
+            while True:
                 with conn:
-                    for device_id, bucket in dirty:
+                    chunk = conn.execute("SELECT device_id, bucket_ts FROM rollup_dirty ORDER BY bucket_ts LIMIT ?",
+                                         (ROLLUP_CHUNK,)).fetchall()
+                    if not chunk:
+                        break
+                    conn.executemany("DELETE FROM rollup_dirty WHERE device_id = ? AND bucket_ts = ?", chunk)
+                    for device_id, bucket in chunk:
                         self._roll_hour(conn, device_id, bucket)
                         days.add((device_id, self._day_start(bucket)))
-                    for device_id, day in days:
-                        self._roll_day(conn, device_id, day)
-            except sqlite3.Error:
-                with conn:  # put the work back so nothing is lost
-                    conn.executemany("INSERT OR IGNORE INTO rollup_dirty VALUES (?, ?)", dirty)
-                raise
-            return len(dirty), len(days)
+                hours += len(chunk)
+            for device_id, day in sorted(days):
+                with conn:
+                    self._roll_day(conn, device_id, day)
+            return hours, len(days)
 
     def _roll_hour(self, conn, device_id: str, start: float) -> None:
         end = start + HOUR
         aggs = ", ".join(f"AVG({f}), MIN({f}), MAX({f})" for f in ROLLUP_FIELDS)
         rows = conn.execute(f"SELECT phase, COUNT(*), {aggs} FROM readings "
                             "WHERE device_id = ? AND ts >= ? AND ts < ? GROUP BY phase", (device_id, start, end)).fetchall()
-        # Consumption counts the step from the previous hour's last reading too (look back 1 h).
-        consumed = dict(conn.execute(
-            """SELECT phase, SUM(CASE WHEN d > 0 THEN d ELSE 0 END) FROM (
-                   SELECT phase, ts, energy_kwh - LAG(energy_kwh) OVER (PARTITION BY phase ORDER BY ts) AS d
-                   FROM readings WHERE device_id = ? AND ts >= ? AND ts < ?)
-               WHERE ts >= ? GROUP BY phase""", (device_id, start - HOUR, end, start)).fetchall())
+        # Consumption of each counter, counting the step from the previous hour's last
+        # reading too (look back 1 h). Sum of positive steps, so counter resets are harmless.
+        steps = ", ".join(f"SUM(CASE WHEN d_{c} > 0 THEN d_{c} ELSE 0 END)" for c in COUNTER_FIELDS)
+        lags = ", ".join(f"{c} - LAG({c}) OVER (PARTITION BY phase ORDER BY ts) AS d_{c}" for c in COUNTER_FIELDS)
+        consumed = {r[0]: r[1:] for r in conn.execute(
+            f"""SELECT phase, {steps} FROM (
+                   SELECT phase, ts, {lags} FROM readings WHERE device_id = ? AND ts >= ? AND ts < ?)
+               WHERE ts >= ? GROUP BY phase""", (device_id, start - HOUR, end, start)).fetchall()}
         conn.execute("DELETE FROM readings_hourly WHERE device_id = ? AND bucket_ts = ?", (device_id, start))
+        cols = ["device_id", "phase", "bucket_ts", "samples",
+                *(f"{f}_{s}" for f in ROLLUP_FIELDS for s in ("avg", "min", "max")),
+                *(CONSUMED[c] for c in COUNTER_FIELDS), "energy_kwh_last"]
         for phase, samples, *vals in rows:
             last = conn.execute("SELECT energy_kwh FROM readings WHERE device_id = ? AND phase = ? AND ts >= ? "
                                 "AND ts < ? ORDER BY ts DESC LIMIT 1", (device_id, phase, start, end)).fetchone()
-            conn.execute(f"INSERT INTO readings_hourly VALUES ({', '.join('?' * (6 + len(vals)))})",
-                         (device_id, phase, start, samples, *vals, consumed.get(phase) or 0.0, last[0] if last else None))
+            used = [v or 0.0 for v in consumed.get(phase, (0.0,) * len(COUNTER_FIELDS))]
+            conn.execute(f"INSERT INTO readings_hourly ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                         (device_id, phase, start, samples, *vals, *used, last[0] if last else None))
 
     def _roll_day(self, conn, device_id: str, start: float) -> None:
         end = self._next_day(start)
@@ -195,26 +226,39 @@ class SQLiteStore(TimeSeriesStore):
                             "LIMIT 1", (device_id, start, end)).fetchone():
             return  # hourly detail already expired: keep the existing daily row as it is
         aggs = ", ".join(f"SUM({f}_avg * samples) / SUM(samples), MIN({f}_min), MAX({f}_max)" for f in ROLLUP_FIELDS)
-        rows = conn.execute(f"SELECT phase, SUM(samples), {aggs}, SUM(consumed_kwh) FROM readings_hourly "
+        sums = ", ".join(f"COALESCE(SUM({CONSUMED[c]}), 0)" for c in COUNTER_FIELDS)
+        rows = conn.execute(f"SELECT phase, SUM(samples), {aggs}, {sums} FROM readings_hourly "
                             "WHERE device_id = ? AND bucket_ts >= ? AND bucket_ts < ? GROUP BY phase",
                             (device_id, start, end)).fetchall()
         conn.execute("DELETE FROM readings_daily WHERE device_id = ? AND bucket_ts = ?", (device_id, start))
+        cols = ["device_id", "phase", "bucket_ts", "samples",
+                *(f"{f}_{s}" for f in ROLLUP_FIELDS for s in ("avg", "min", "max")),
+                *(CONSUMED[c] for c in COUNTER_FIELDS), "energy_kwh_last"]
         for phase, samples, *vals in rows:
             last = conn.execute("SELECT energy_kwh_last FROM readings_hourly WHERE device_id = ? AND phase = ? "
                                 "AND bucket_ts >= ? AND bucket_ts < ? ORDER BY bucket_ts DESC LIMIT 1",
                                 (device_id, phase, start, end)).fetchone()
-            conn.execute(f"INSERT INTO readings_daily VALUES ({', '.join('?' * (5 + len(vals)))})",
+            conn.execute(f"INSERT INTO readings_daily ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
                          (device_id, phase, start, samples, *vals, last[0] if last else None))
 
     def apply_retention(self) -> tuple[int, int]:
         """Delete expired raw rows (only once rolled up) and expired hourly rollups."""
         conn = self._conn()
+        cutoff = self._raw_cutoff()
+        pending = conn.execute("SELECT MIN(bucket_ts) FROM rollup_dirty").fetchone()[0]
+        if pending is not None:
+            cutoff = min(cutoff, pending)  # never delete raw data that isn't rolled up yet
+        raw = 0
+        while True:  # in chunks: a day of 1 Hz data is ~350k rows; don't hold the write lock that long
+            with conn:
+                n = conn.execute(
+                    "DELETE FROM readings WHERE (device_id, phase, ts) IN "
+                    "(SELECT device_id, phase, ts FROM readings WHERE ts < ? LIMIT ?)",
+                    (cutoff, RETENTION_CHUNK)).rowcount
+            raw += n
+            if n < RETENTION_CHUNK:
+                break
         with conn:
-            cutoff = self._raw_cutoff()
-            pending = conn.execute("SELECT MIN(bucket_ts) FROM rollup_dirty").fetchone()[0]
-            if pending is not None:
-                cutoff = min(cutoff, pending)  # never delete raw data that isn't rolled up yet
-            raw = conn.execute("DELETE FROM readings WHERE ts < ?", (cutoff,)).rowcount
             hourly = conn.execute("DELETE FROM readings_hourly WHERE bucket_ts < ?",
                                   (_time.time() - self.hourly_retention_s,)).rowcount
         return raw, hourly
@@ -264,8 +308,8 @@ class SQLiteStore(TimeSeriesStore):
     def _rollup_series(self, device_id, start, end, fields, phase, every_s):
         self.refresh_rollups()
         table = "readings_daily" if every_s and every_s >= DAY else "readings_hourly"
-        cols = ", ".join("MAX(energy_kwh_last)" if f == "energy_kwh" else f"SUM({f}_avg * samples) / SUM(samples)"
-                         for f in fields)
+        cols = ", ".join("MAX(energy_kwh_last)" if f == "energy_kwh" else f"SUM({CONSUMED[f]})" if f in CONSUMED
+                         else f"SUM({f}_avg * samples) / SUM(samples)" for f in fields)
         group = "bucket_ts" if not every_s or every_s in (HOUR, DAY) else f"CAST(bucket_ts / {int(every_s)} AS INTEGER) * {int(every_s)}"
         params: list = [device_id, start.timestamp(), end.timestamp()]
         phase_sql = ""
@@ -281,7 +325,7 @@ class SQLiteStore(TimeSeriesStore):
 
     def stats(self, device_id, start, end, field, phase):
         (field,) = _check_fields([field])
-        if start.timestamp() < self._raw_cutoff() and field != "energy_kwh":
+        if start.timestamp() < self._raw_cutoff() and field not in COUNTER_FIELDS:
             self.refresh_rollups()
             row = self._conn().execute(
                 f"SELECT SUM({field}_avg * samples) / SUM(samples), MIN({field}_min), MAX({field}_max), SUM(samples) "
@@ -304,10 +348,12 @@ class SQLiteStore(TimeSeriesStore):
                 phase_sql += " AND phase = ?"
                 params.append(phase)
             out: dict[str, list[dict]] = {}
-            for p, b, kwh in self._conn().execute(
-                    f"SELECT phase, bucket_ts, consumed_kwh FROM {table} WHERE device_id = ? AND bucket_ts >= ? "
-                    f"AND bucket_ts < ?{phase_sql} ORDER BY phase, bucket_ts", params):
-                out.setdefault(p, []).append({"start": _iso(b), "kwh": kwh or 0.0})
+            for p, b, kwh, sw, exp in self._conn().execute(
+                    f"SELECT phase, bucket_ts, consumed_kwh, consumed_sw_kwh, exported_kwh FROM {table} "
+                    f"WHERE device_id = ? AND bucket_ts >= ? AND bucket_ts < ?{phase_sql} ORDER BY phase, bucket_ts",
+                    params):
+                out.setdefault(p, []).append({"start": _iso(b), "kwh": kwh or 0.0, "sw_kwh": sw or 0.0,
+                                              "export_kwh": exp or 0.0})
             return out
         # Any other bucket size: compute from raw data.
         bucket, off = int(bucket_s), int(tz_offset_s)

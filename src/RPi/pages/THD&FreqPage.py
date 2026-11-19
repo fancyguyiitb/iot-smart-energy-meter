@@ -1,9 +1,7 @@
 import tkinter as tk
 import sqlite3
 import matplotlib.pyplot as plt
-from tkinter import Label
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from datetime import datetime
 
 # Set global dark theme for matplotlib
 # plt.style.use('dark_background')

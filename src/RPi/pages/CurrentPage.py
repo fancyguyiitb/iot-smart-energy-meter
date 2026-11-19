@@ -2,9 +2,8 @@ import tkinter as tk
 import sqlite3
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from datetime import datetime, timedelta, date, timezone
+from datetime import datetime, timedelta
 import matplotlib.dates as mdates
-import threading
 from zoneinfo import ZoneInfo
 
 from config import DB_PATH as DB_NAME  # one DB path shared by every process
@@ -232,7 +231,6 @@ class CurrentPage(tk.Frame):
 
         if timestamps:
             MAX_GAP = 60  # seconds
-            plotted_labels = set()
 
             for value_type in self.value_types:
                 ts = phase_data["timestamps"]

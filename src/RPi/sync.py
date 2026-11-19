@@ -51,6 +51,9 @@ from sprint import Logger
 BASE_URL = f"{SERVER_URL}/api/write-data"
 EVENTS_URL = f"{SERVER_URL}/api/write-events"
 LIVE_URL = f"{SERVER_URL}/api/live"
+# Set by the live lane when the server becomes reachable again, so the durable lane stops
+# backing off and drains the backlog at once (backoff could otherwise wait up to 5 min).
+network_back = threading.Event()
 MAX_BACKOFF_S = 300
 
 l = Logger.get_instance(debug=True)
@@ -149,6 +152,7 @@ class LiveLane:
             self.last_sent_id = newest_id
             if self.failing:
                 l.iprint("Live lane restored")
+                network_back.set()
             self.failing = False
         elif not self.failing:
             l.eprint("Live lane unavailable; readings still go through the durable sync")
@@ -175,7 +179,9 @@ def main() -> None:
             failures += 1
             delay = min(SYNC_INTERVAL_S * 2 ** (failures - 1), MAX_BACKOFF_S) * random.uniform(0.8, 1.2)
             l.eprint(f"Sync failed ({failures} in a row); retrying in {delay:.0f} s")
-            time.sleep(delay)
+            if network_back.wait(delay):  # the live lane saw the server again: retry now
+                network_back.clear()
+                l.iprint("Server reachable again; retrying sync now")
             continue
         failures = 0
         if result is True and count_unsynced() >= SYNC_BATCH_SIZE:

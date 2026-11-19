@@ -39,6 +39,7 @@ gpio_levels: dict[int, int] = {}
 gpio_modes: dict[int, str] = {}
 gpio_lock = threading.Lock()
 _stop = threading.Event()
+spi_stall_until = 0.0  # simulated firmware stall: SPI frames hang until then
 
 
 def _apply_relays() -> None:
@@ -78,6 +79,9 @@ class SpiFrame(BaseModel):
 def spi_transfer(bus: int, device: int, frame: SpiFrame):
     if (bus, device) != (0, 0):
         raise HTTPException(404, "No chip on that chip-select")
+    wait = spi_stall_until - time.time()
+    if wait > 0:  # the Pi is "frozen": the chip keeps metering, the firmware can't read it
+        time.sleep(wait)
     return {"rx": chip.transfer(frame.tx)}
 
 
@@ -169,6 +173,7 @@ class PhaseUpdate(BaseModel):
     custom_kw: float | None = Field(None, ge=-10, le=15)
     custom_pf: float | None = Field(None, ge=0.05, le=1.0)
     ct_reversed: bool | None = None
+    welded: bool | None = None
 
 
 @app.post("/api/phase/{phase}")
@@ -205,6 +210,19 @@ def scenario(name: str):
 def reset_truth_energy():
     installation.reset_truth_energy()
     return {"ok": True}
+
+
+class StallRequest(BaseModel):
+    seconds: float = Field(20, ge=1, le=120)
+
+
+@app.post("/api/chip/stall-spi")
+def stall_spi(req: StallRequest):
+    """Freeze the firmware's SPI access for a while (a Pi stall / overloaded CPU). The chip
+    keeps integrating energy in hardware; software integration can only guess the gap."""
+    global spi_stall_until
+    spi_stall_until = time.time() + req.seconds
+    return {"stalled_until": spi_stall_until}
 
 
 @app.post("/api/chip/power-cycle")

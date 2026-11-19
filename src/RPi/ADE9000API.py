@@ -298,6 +298,11 @@ class ADE9000:
 
         return {"Temperature_Reg": temp_reg, "Temperature": temp_value}
 
+    def read_energy_watthr_raw(self):
+        """Raw 32-bit xWATTHR_HI accumulator codes per channel (difference them to get energy)."""
+        return {"A": self.spi_read_32(ADDR_AWATTHR_HI), "B": self.spi_read_32(ADDR_BWATTHR_HI),
+                "C": self.spi_read_32(ADDR_CWATTHR_HI)}
+
     def read_energy_watthr_reg_value(self):
         """Reads the accumulated active energy (Wh) for all phases.
 

@@ -87,6 +87,8 @@ def main() -> None:
     parser.add_argument("--server-port", type=int, default=8000)
     parser.add_argument("--board-port", type=int, default=9000)
     parser.add_argument("--device-id", default="meter-001")
+    parser.add_argument("--device-server-url", metavar="URL",
+                        help="server address the meter uses, if different (e.g. through scripts/chaos_check.py's proxy)")
     parser.add_argument("--sandbox", type=Path, metavar="DIR",
                         help="isolated run: server DB, device identity and meter data all live in DIR "
                              "(your normal data is untouched; good for tests and CI)")
@@ -115,7 +117,8 @@ def main() -> None:
     log("setup", run_once(["manage.py", "provision-device", "--device-id", args.device_id, "--name", "Virtual meter",
                            "--env-out", str(device_env_file), "--server-url", server_url], SERVER, env))
 
-    fw_env = env | fw_extra | {"VOLTIX_HAL": "virtual", "SIM_URL": board_url, "SERVER_URL": server_url,
+    fw_env = env | fw_extra | {"VOLTIX_HAL": "virtual", "SIM_URL": board_url,
+                               "SERVER_URL": args.device_server_url or server_url,
                                "GUI_GEOMETRY": os.getenv("GUI_GEOMETRY", "1600x900")}
 
     procs = [

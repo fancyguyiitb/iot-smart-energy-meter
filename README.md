@@ -25,12 +25,25 @@ python scripts/run_local.py       # add --gui for the meter's touchscreen UI
 
 On first start the launcher prints a one-time sign-up link that registers the meter to a new account. Run `python src/RPi/claim.py` for a fresh one.
 
-```bash
-python scripts/run_tests.py       # unit + regression tests (firmware and server)
-python scripts/e2e_check.py       # end-to-end checks against the running stack
+### Testing
 
+| Command | What it checks |
+|---|---|
+| `python scripts/run_tests.py` | Lint (ruff) + ~90 unit and regression tests for the firmware and the server |
+| `python scripts/e2e_check.py` | Against a running stack: security, sign-up, live data, measurement accuracy vs the virtual wires, relay round trip with safety interlocks |
+| `python scripts/ui_check.py --user U --password P` | Drives Edge/Chrome through every web-app page and the virtual board panel; fails on any JavaScript error |
+| `python scripts/chaos_check.py --user U --password P --device-db …` | Cuts the network between meter and cloud, then proves every reading taken during the outage reached the server |
+
+```bash
 # isolated run that never touches your normal data (what tests/CI use):
 python scripts/run_local.py --sandbox .sandbox --server-port 8100 --board-port 9100
+
+# chaos test: route the meter through the test's proxy (port 8200), then run chaos_check.py
+python scripts/run_local.py --sandbox .sandbox --server-port 8100 --board-port 9100 --device-server-url http://127.0.0.1:8200
+
+# 14 days of synthetic history so Insights (balance advisor, bill forecast) has something to analyse
+# (prefix DATA_DIR=.sandbox/server to seed a sandbox instead of your normal data):
+cd src/Server && python manage.py seed-history --device-id meter-001 --days 14
 ```
 
 ### How it fits together
@@ -54,9 +67,9 @@ On the real Pi, set `VOLTIX_HAL=hardware` in `src/RPi/device.env` and the same f
 | `src/Server/` | FastAPI backend: auth, ingest, analytics, device WebSocket, `storage/` (SQLite or InfluxDB), `manage.py` |
 | `src/WebApp/` | Browser client (reference client while the Flutter source is missing) |
 | `src/Application/` | Flutter project scaffold (the Dart `lib/` was lost to a `.gitignore` rule, now fixed) |
-| `scripts/` | `run_local.py`, `run_tests.py`, `e2e_check.py` |
+| `scripts/` | `run_local.py` (launcher), `run_tests.py`, `e2e_check.py`, `ui_check.py`, `chaos_check.py` |
 | `tests/` | Firmware and server regression tests |
-| `docs/BUGFIXES.md` | Known limitations and the feature backlog |
+| `docs/BACKLOG.md` | Known limitations and the feature backlog |
 | `deploy/` | InfluxDB compose file for trying the cloud storage backend |
 | `pcb/`, `3d_models/`, `reports/`, `others/`, `bom.xls` | Hardware design files and project reports |
 

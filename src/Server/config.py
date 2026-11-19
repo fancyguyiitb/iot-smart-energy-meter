@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 60  # was 3600 *minutes* (60 h)
     password_hash_iterations: int = 600_000  # PBKDF2-HMAC-SHA256
     claim_ttl_seconds: int = 600  # how long a device sign-up QR code stays valid
-    command_timeout_seconds: float = 5.0  # wait for the device to acknowledge a relay command
+    command_timeout_seconds: float = 8.0  # wait for the meter's ack (it verifies the switch first, ~1-3 s)
     device_online_timeout_seconds: float = 90.0
     max_batch_size: int = 2000
 

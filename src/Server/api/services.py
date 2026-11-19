@@ -42,6 +42,7 @@ class DeviceHub:
     def __init__(self) -> None:
         self.connections: dict[str, DeviceConnection] = {}
         self.relays: dict[str, dict] = {}  # last reported relay state, kept while offline
+        self.details: dict[str, dict] = {}  # per-phase safety info from the meter (reason, lockout, welded)
         self.last_seen: dict[str, float] = {}
 
     async def register(self, device_id: str, websocket: WebSocket) -> None:
@@ -70,16 +71,25 @@ class DeviceHub:
                 fut.set_exception(DeviceOffline(reason))
         conn.pending.clear()
 
-    def handle_message(self, device_id: str, message: dict) -> None:
+    def handle_message(self, device_id: str, message: dict) -> dict | None:
+        """Update state from a meter message. Returns a device-initiated event (trip,
+        welded relay) for the caller to audit-log, else None."""
         self.last_seen[device_id] = time.time()
         relays = message.get("relays")
         if isinstance(relays, dict):
             self.relays[device_id] = {p: relays.get(p) for p in ("R", "Y", "B")}
+        details = message.get("details")
+        if isinstance(details, dict):
+            self.details[device_id] = {p: details.get(p) for p in ("R", "Y", "B")}
+        if message.get("type") == "event" and message.get("phase") in ("R", "Y", "B"):
+            return {"phase": message["phase"], "action": str(message.get("action", ""))[:32],
+                    "reason": str(message.get("reason", ""))[:300]}
         if message.get("type") == "ack":
             conn = self.connections.get(device_id)
             fut = conn.pending.pop(str(message.get("id")), None) if conn else None
             if fut is not None and not fut.done():
                 fut.set_result(message)
+        return None
 
     async def send_command(self, device_id: str, command: str, phase: str | None, timeout: float) -> dict:
         conn = self.connections.get(device_id)
@@ -109,6 +119,7 @@ class DeviceHub:
             "device_id": device_id,
             "online": self.is_online(device_id),
             "relays": self.relays.get(device_id, {"R": None, "Y": None, "B": None}),
+            "details": self.details.get(device_id, {"R": None, "Y": None, "B": None}),
             "last_seen": self.last_seen.get(device_id),
         }
 

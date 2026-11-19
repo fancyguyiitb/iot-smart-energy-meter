@@ -18,7 +18,7 @@ Effort: **S** ≈ 1 day, **M** ≈ 2–4 days, **L** ≈ 1–2 weeks.
 | Transport | Device keys travel in request headers, which is safe only over HTTPS | Enforce HTTPS/WSS in the cloud; mTLS device certificates (feature 13) |
 | Operations | No systemd units on the Pi, so a crashed process stays down; logs only go to stdout | Unit files with `Restart=always` and a watchdog; rotated log files |
 | Client | The Flutter source was lost; the web app is the reference client | Rewrite against the current API (`src/Application/README.md`) |
-| Tests | No automated tests for sync backoff, relay reconnects or the InfluxDB backend | Cover them in hardware-in-the-loop CI (feature 11); `run_local.py --sandbox` already gives CI an isolated stack |
+| Tests | `e2e_check`, `ui_check` and `chaos_check` exist but run by hand; the InfluxDB backend is untested | Run them in hardware-in-the-loop CI (feature 11); `run_local.py --sandbox` already gives CI an isolated stack |
 
 **Outside the code:** the old QR encryption key (`QRCodePage.py`) and the Railway deployment URLs are in git history. Rotate any secrets of that deployment if it still exists.
 
@@ -28,11 +28,11 @@ Effort: **S** ≈ 1 day, **M** ≈ 2–4 days, **L** ≈ 1–2 weeks.
 
 | # | Feature | Area | Effort | Do first |
 |---|---|---|---|---|
-| 1 | Billing-grade energy from the chip's own accumulators | Metering | M | – |
-| 2 | Sync sequence numbers and high-water acks, plus a chaos test (the live lane is done) | Reliability | S | – |
+| 1 | ✅ Done: Billing-grade energy from the chip's own accumulators | Metering | M | – |
+| 2 | Sync sequence numbers and high-water acks (live lane and chaos test are done) | Reliability | S | – |
 | 3 | Power-quality event engine | Metering | M | – |
-| 4 | Fail-safe switching with closed-loop verification | Control | M | – |
-| 5 | 3-phase load-balancing advisor and bill forecast | Product | L | 1, 6 |
+| 4 | ✅ Done: Fail-safe switching with closed-loop verification | Control | M | – |
+| 5 | ✅ Done: 3-phase load-balancing advisor and bill forecast | Product | L | – |
 | 6 | Appliance detection from power signatures | Product / ML | L | – |
 | 7 | Waveform capture and harmonic spectrum | Metering / DSP | L | – |
 | 8 | Max-demand monitoring and automatic load shedding | Control | M | 4 |
@@ -48,6 +48,14 @@ Effort: **S** ≈ 1 day, **M** ≈ 2–4 days, **L** ≈ 1–2 weeks.
 | 18 | Monthly report and data export | Product | S | – |
 | 19 | Observability: metrics and dashboards | Operations | S | – |
 | 20 | Household roles and sharing | Product / Security | M | – |
+
+### Done
+
+| # | Feature | Proof |
+|---|---|---|
+| 1 | The chip's `xWATTHR` accumulators are the billing counter (wrap-safe differencing, never reset-on-read); software integration runs alongside as a cross-check; export tracked separately. | Over a window that includes a 30 s firmware stall (virtual board: *Freeze Pi's SPI bus*): chip **−0.3 %**, software **−52 %** vs the board's true energy. Steady state: both within 0.4 %. |
+| 4 | Meter-side `RelayController`: OFF verified by measured current (welded-contact detection, also continuous), 3-min minimum off-time, anti-chatter, no ON into a sag/swell/outage, 32 A local overcurrent trip, state persisted across restarts. Server keeps desired vs reported state and audits automatic actions. | Live on the virtual board: welded relay → "still 6.37 A after switching off"; 8.5 kW overload → tripped at 41.2 A and audited as `auto:trip`; ON refused at 173 V; 11 unit tests. |
+| 5 | Unbalance profile, movable-load detection from power steps, greedy what-if moves (never onto the heaviest phase), slab-tariff bill forecast with crossing dates and an achievable saving tip, per-user tariff. | On 14 days of seeded history it finds the AC, water heater, second AC, microwave and washer with correct sizes and hours, recommends "move the 1.6 kW 20:00–01:00 load from Y to B: 151 % → 77 %, neutral 11.3 A → 5.9 A", and warns about crossing 300 and 500 units. |
 
 **A strong interview set:** 1 + 3 + 4 + 11. That covers hardware depth, safety under an unreliable network, and engineering rigour, and each is demoable on the virtual board. Add 5 if you want a product story.
 
